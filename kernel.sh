@@ -23,7 +23,7 @@ WORKDIR="$(pwd)"
 KERNEL="$WORKDIR/kernel"
 
 # Cloning Sources
-git clone --single-branch --depth=1 https://github.com/alternoegraha/kernel_xiaomi_fog_14.git -b meme $KERNEL && cd $KERNEL
+git clone --single-branch --depth=1 https://github.com/ahmadsyahputra1222-boop/kernel_fog -b motregen $KERNEL && cd $KERNEL
 
 # Bail out if script fails
 set -e
@@ -53,11 +53,11 @@ KERNEL_DIR="$(pwd)"
 BASEDIR="$(basename "$KERNEL_DIR")"
 
 # The name of the Kernel, to name the ZIP
-ZIPNAME="Mi680-WWY-Test"
+ZIPNAME="Clover-test-v1"
 
 # Build Author
 # Take care, it should be a universal and most probably, case-sensitive
-AUTHOR="alternoegraha"
+AUTHOR="Aspfork"
 
 # Architecture
 ARCH=arm64
@@ -91,9 +91,8 @@ PTTG=1
 if [ $PTTG = 1 ]
 then
 	# Set Telegram Chat ID
-	CHATID="-2132871421"
-	TOKEN="6797203948:AAGdVhvcwgpRJkS0gybPbZypmnWJObkpCww"
-fi
+	CHATID="-1003984906981"
+	TOKEN="8958541727:AAFJuU7mysRCS6TlXQtqZvrrR-pJd3zvt9c
 
 # Generate a full DEFCONFIG prior building. 1 is YES | 0 is NO(default)
 DEF_REG=0
@@ -106,12 +105,12 @@ FILES=Image.gz
 BUILD_DTBO=0
 
 # PATCH KERNELSU
-KSU=0
+KSU=1
 if [ $KSU = 1 ]
 then
-curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
+curl -LSs "https://raw.githubusercontent.com/dre698/NadekoSU/main/kernel/setup.sh" | bash -
 KSU_GIT_VERSION=$(cd KernelSU && git rev-list --count HEAD)
-KERNELSU_VERSION=$(($KSU_GIT_VERSION + 10000 + 200))
+KERNELSU_VERSION=$((33300 + $KSU_GIT_VERSION))
 fi
 
 # Sign the zipfile
