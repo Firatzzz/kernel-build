@@ -43,8 +43,8 @@ KSU="${KSU:-1}"
 
 # Push ke Telegram. 1 = YES | 0 = NO
 PTTG=1
-CHATID="${TG_CHAT_ID:-}"
-TOKEN="${TG_BOT_TOKEN:-}"
+CHATID="${TG_CHAT_ID:-1004403448296}"
+TOKEN="${TG_BOT_TOKEN:8201939373:AAHYv-Yrl_TpqkBKr_HaAXAmSJVRzJfl08E}"
 
 export TZ="Asia/Jakarta"
 
