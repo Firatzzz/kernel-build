@@ -300,10 +300,6 @@ then
         patch -p1 < "$patch_file"
     done
 
-    for patch1_file in "$KERNEL_DIR/patchs/KernelSU_umount.patch"
-    do
-        patch -p1 < "$patch1_file"
-    done
 fi
 
 BUILD_START=$(date +"%s")
