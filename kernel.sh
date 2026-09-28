@@ -266,12 +266,15 @@ build_kernel()
 fi
 
 if [ "$PTTG" = 1 ]; then
-    # Menggunakan Heredoc agar aman dari karakter khusus dan kutip dalam variabel
-    TG_MSG=$(cat << 'EOF'
+    # Ambil tanggal di luar heredoc biar aman
+    BUILD_DATE=$(TZ=Asia/Jakarta date)
+    
+    # Heredoc tanpa tanda petik satu pada EOF agar variabel di dalamnya bisa dibaca
+    TG_MSG=$(cat << EOF
 <b>CI Build Triggered</b>
 <b>Docker OS: </b><code>$DISTRO</code>
 <b>Kernel Version : </b><code>$KERVER</code>
-<b>Date : </b><code>$(TZ=Asia/Jakarta date)</code>
+<b>Date : </b><code>$BUILD_DATE</code>
 <b>Device : </b><code>$MODEL [$DEVICE]</code>
 <b>Host Core Count : </b><code>$PROCS</code>
 <b>Compiler Used : </b><code>$KBUILD_COMPILER_STRING</code>
