@@ -10,7 +10,7 @@ name: Build Shisouka Kernel
 on:
   # Otomatis jalan setiap ada commit baru di repo kernel-build
   push:
-    branches: [main]
+    branches: [master, main]
     paths-ignore:
       - "**.md"
   # Bisa dijalankan manual dari tab Actions
