@@ -157,12 +157,19 @@ jobs:
           tar -xf "$HOME/clang.tar.gz" -C "$TC/clang"
           rm -f "$HOME/clang.tar.gz"
 
-          # Tarball bisa flat atau punya folder induk; cari clang yang sebenarnya.
-          CLANG_BIN="$(find "$TC/clang" -maxdepth 3 -type f -name clang -path '*/bin/*' | head -n1)"
-          [ -n "$CLANG_BIN" ] || { echo "clang tidak ditemukan setelah ekstrak"; exit 1; }
+          # Tarball bisa flat atau punya folder induk, dan bin/clang biasanya
+          # symlink ke clang-17 (bukan file biasa), jadi jangan pakai -type f saja.
+          CLANG_BIN="$(find "$TC/clang" \( -type f -o -type l \) -name clang -path '*/bin/*' | head -n1)"
+          if [ -z "$CLANG_BIN" ]; then
+            echo "clang tidak ditemukan. Isi hasil ekstrak:"
+            ls -la "$TC/clang" | head -n 30
+            find "$TC/clang" -maxdepth 3 | head -n 60
+            exit 1
+          fi
           CLANG_DIR="$(dirname "$(dirname "$CLANG_BIN")")"
           echo "CLANG_DIR=$CLANG_DIR" >> "$GITHUB_ENV"
           "$CLANG_BIN" --version | head -n1
+          ls "$CLANG_DIR/bin" | grep -E '^(ld\.lld|llvm-ar|llvm-nm|llvm-objdump|llvm-strip)$' || echo "::warning::sebagian tool llvm tidak ada"
 
           git clone --depth=1 "$GCC64_REPO" "$TC/gcc64"
           git clone --depth=1 "$GCC32_REPO" "$TC/gcc32"
@@ -213,37 +220,46 @@ jobs:
           export KBUILD_BUILD_HOST="github-actions"
           export LOCALVERSION="-${KERNEL_NAME}"
 
+          # Mengikuti build.sh upstream source ini (LLVM=1 LLVM_IAS=1).
+          # Tool (ar/nm/ld/...) dibiarkan ditentukan otomatis oleh kbuild.
           ARGS=(
             O=out ARCH=arm64
+            LLVM=1 LLVM_IAS=1
             CC=clang HOSTCC=clang HOSTCXX=clang++
-            LLVM_IAS=1 PYTHON=python3
+            PYTHON=python3
             CROSS_COMPILE=aarch64-linux-android-
             CROSS_COMPILE_ARM32=arm-linux-androideabi-
             CLANG_TRIPLE=aarch64-linux-gnu-
-            AR=llvm-ar NM=llvm-nm OBJDUMP=llvm-objdump STRIP=llvm-strip
-            LD=aarch64-linux-android-ld
+            KCFLAGS=-Wno-error
           )
 
           rm -rf out
           make "${ARGS[@]}" "$DEFCONFIG" 2>&1 | tee "$LOG"
 
-          # Gabungkan fragment KernelSU bila ada
-          if [ "$USE_KSU" = "true" ] && [ -f arch/arm64/configs/vendor/ksu.config ]; then
-            echo "Merge vendor/ksu.config"
-            scripts/kconfig/merge_config.sh -m -O out out/.config arch/arm64/configs/vendor/ksu.config
+          # Gabungkan fragment: konfigurasi khusus fog + KernelSU (bila ada)
+          FRAGS=()
+          [ -f arch/arm64/configs/vendor/xiaomi/fog.config ] && FRAGS+=(arch/arm64/configs/vendor/xiaomi/fog.config)
+          [ "$USE_KSU" = "true" ] && [ -f arch/arm64/configs/vendor/ksu.config ] && FRAGS+=(arch/arm64/configs/vendor/ksu.config)
+          if [ "${#FRAGS[@]}" -gt 0 ]; then
+            echo "Merge fragment: ${FRAGS[*]}"
+            scripts/kconfig/merge_config.sh -m -O out out/.config "${FRAGS[@]}"
             make "${ARGS[@]}" olddefconfig
           fi
 
           START=$(date +%s)
-          make -j"$(nproc --all)" "${ARGS[@]}" 2>&1 | tee -a "$LOG"
+          # Target sesuai perangkat: kernel + dtb.img + dtbo.img (bukan appended-dtb)
+          make -j"$(nproc --all)" "${ARGS[@]}" Image.gz dtb.img dtbo.img 2>&1 | tee -a "$LOG"
           END=$(date +%s)
           echo "BUILD_TIME=$(( (END-START)/60 ))m $(( (END-START)%60 ))s" >> "$GITHUB_ENV"
 
-          ls -la out/arch/arm64/boot/ || true
-          if [ ! -f out/arch/arm64/boot/Image.gz-dtb ] && [ ! -f out/arch/arm64/boot/Image.gz ] && [ ! -f out/arch/arm64/boot/Image ]; then
-            echo "Tidak ada Image hasil build" | tee -a "$LOG"
-            exit 1
-          fi
+          BOOT=out/arch/arm64/boot
+          ls -la "$BOOT" || true
+          for f in Image.gz dtb.img dtbo.img; do
+            if [ ! -s "$BOOT/$f" ]; then
+              echo "File hasil build tidak ada: $BOOT/$f" | tee -a "$LOG"
+              exit 1
+            fi
+          done
 
       - name: Package AnyKernel3 zip
         run: |
@@ -254,11 +270,18 @@ jobs:
           [ "$USE_KSU" = "true" ] && NAME="${NAME}-KSU"
           NAME="${NAME}-${STAMP}-${COMMIT_SHORT}.zip"
 
-          if   [ -f "$BOOT/Image.gz-dtb" ]; then cp "$BOOT/Image.gz-dtb" "$AK3/Image.gz-dtb"
-          elif [ -f "$BOOT/Image.gz" ];     then cp "$BOOT/Image.gz" "$AK3/Image.gz"
-          else                                   cp "$BOOT/Image" "$AK3/Image"
+          # Cek AnyKernel3 memang mendukung perangkat ini
+          echo "--- device.name di anykernel.sh ---"
+          grep -nE 'device\.name|do\.devicecheck' "$AK3/anykernel.sh" || true
+          if ! grep -qiE 'device\.name[0-9]*=(fog|wind|rain)' "$AK3/anykernel.sh"; then
+            echo "::warning::anykernel.sh tidak menyebut fog/wind/rain. Zip mungkin ditolak recovery (device check)."
           fi
-          [ -f "$BOOT/dtbo.img" ] && cp "$BOOT/dtbo.img" "$AK3/dtbo.img" || true
+
+          cp "$BOOT/Image.gz"  "$AK3/Image.gz"
+          cp "$BOOT/dtb.img"   "$AK3/dtb.img"
+          cp "$BOOT/dtbo.img"  "$AK3/dtbo.img"
+          echo "--- isi AnyKernel3 ---"
+          ls -la "$AK3"
 
           mkdir -p "$GITHUB_WORKSPACE/output"
           (cd "$AK3" && zip -r9 "$GITHUB_WORKSPACE/output/$NAME" . -x ".git*" -x "README.md" -x "*.zip")
