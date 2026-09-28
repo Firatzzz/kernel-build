@@ -3,8 +3,8 @@ name: Build Shisouka Kernel
 # Simpan file ini di repo Firatzzz/kernel-build:
 #   .github/workflows/build-kernel.yml
 #
-# Secrets yang wajib dibuat (Settings > Secrets and variables > Actions):
-#   TG_BOT_TOKEN  -> token bot Telegram
+# Token bot sudah ditanam di bagian env (TG_BOT_TOKEN).
+# Secret yang masih perlu dibuat (Settings > Secrets and variables > Actions):
 #   TG_CHAT_ID    -> chat ID / channel tujuan upload
 
 on:
@@ -44,6 +44,8 @@ env:
   MODEL: Redmi 10C
   BUILD_USER: Firatz
   TZ: Asia/Jakarta
+  TG_BOT_TOKEN: "8201939373:AAGFCtshkYHYY3rqC14C0sluE2qtHISXHcs"
+  TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
   USE_KSU: ${{ github.event_name != 'workflow_dispatch' || inputs.ksu }}
 
 jobs:
@@ -100,8 +102,8 @@ jobs:
         run: |
           KSU_TEXT="Off"
           [ "$USE_KSU" = "true" ] && KSU_TEXT="On (v${KSU_VERSION})"
-          curl -s "https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage" \
-            -d chat_id="${{ secrets.TG_CHAT_ID }}" \
+          curl -s "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TG_CHAT_ID}" \
             -d parse_mode=HTML \
             -d disable_web_page_preview=true \
             --data-urlencode text="<b>${KERNEL_NAME} build started</b>
@@ -111,6 +113,12 @@ jobs:
           <b>Commit:</b> <code>${COMMIT_SHORT} - ${COMMIT_MSG}</code>
           <b>Run:</b> <a href=\"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\">#${GITHUB_RUN_NUMBER}</a>" \
             > /dev/null
+
+      - name: Notify Telegram (compiling)
+        run: |
+          curl -s "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TG_CHAT_ID}" \
+            --data-urlencode text="[2/3] Toolchain siap, kernel mulai dikompilasi..." > /dev/null || true
 
       - name: Compile kernel
         run: |
@@ -166,11 +174,17 @@ jobs:
           echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
           echo "ZIP_MD5=$(md5sum "$GITHUB_WORKSPACE/$ZIP_NAME" | cut -d' ' -f1)" >> "$GITHUB_ENV"
 
+      - name: Notify Telegram (packaging)
+        run: |
+          curl -s "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TG_CHAT_ID}" \
+            --data-urlencode text="[3/3] Kompilasi selesai (${BUILD_TIME}), mengunggah zip..." > /dev/null || true
+
       - name: Upload zip to Telegram
         run: |
           curl -s -F document=@"$GITHUB_WORKSPACE/$ZIP_NAME" \
-            "https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendDocument" \
-            -F chat_id="${{ secrets.TG_CHAT_ID }}" \
+            "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
+            -F chat_id="${TG_CHAT_ID}" \
             -F parse_mode=HTML \
             -F caption="<b>${KERNEL_NAME}</b> for ${MODEL}
           Build time: <code>${BUILD_TIME}</code>
@@ -189,7 +203,7 @@ jobs:
         if: failure()
         run: |
           curl -s -F document=@"$GITHUB_WORKSPACE/error.log" \
-            "https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendDocument" \
-            -F chat_id="${{ secrets.TG_CHAT_ID }}" \
+            "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
+            -F chat_id="${TG_CHAT_ID}" \
             -F caption="${KERNEL_NAME} build FAILED - run #${GITHUB_RUN_NUMBER}" \
             > /dev/null || true
