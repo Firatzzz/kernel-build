@@ -109,10 +109,11 @@ BUILD_DTBO=0
 KSU=1
 if [ $KSU = 1 ]
 then
-curl -LSs "https://raw.githubusercontent.com/dre698/NadekoSU/main/kernel/setup.sh" | bash -
+# Remove old KernelSU checkout so ReSukiSU is cloned fresh
+rm -rf KernelSU drivers/kernelsu
+curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s builtin
 KSU_GIT_VERSION=$(cd KernelSU && git rev-list --count HEAD)
 KERNELSU_VERSION=$((33300 + $KSU_GIT_VERSION))
-DEFCONFIG="$DEFCONFIG vendor/ksu.config"
 fi
 
 # Sign the zipfile
@@ -286,6 +287,16 @@ make O=out $DEFCONFIG
 
 # Disable 32-bit compat vDSO (fails to build with clang: __NR_compat_* undeclared)
 scripts/config --file out/.config -d COMPAT_VDSO
+if [ "$KSU" = "1" ]
+then
+	# ReSukiSU with manual hooks (see patchs/KernelSU.patch)
+	scripts/config --file out/.config \
+		-e KSU -e KSU_MANUAL_HOOK \
+		-e KSU_MANUAL_HOOK_AUTO_INPUT_HOOK \
+		-e KSU_MANUAL_HOOK_AUTO_SETUID_HOOK \
+		-e KSU_MANUAL_HOOK_AUTO_INITRC_HOOK \
+		-d KSU_HACK_ARM64_BRANCH_LINK
+fi
 make O=out olddefconfig
 if [ $DEF_REG = 1 ]; then
 
@@ -296,7 +307,16 @@ if [ $DEF_REG = 1 ]; then
 						This is an auto-generated commit"
 	fi
 
-# KernelSU.patch removed: NadekoSU hooks via CONFIG_KSU_HACK_ARM64_BRANCH_LINK (vendor/ksu.config)
+        cp -r "$WORKDIR/patchs" "$KERNEL_DIR/"
+
+if [ "$KSU" = "1" ]
+then
+    for patch_file in "$KERNEL_DIR/patchs/KernelSU.patch"
+    do
+        patch -p1 < "$patch_file"
+    done
+
+fi
 
 BUILD_START=$(date +"%s")
 
