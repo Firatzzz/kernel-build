@@ -291,23 +291,22 @@ if [ $DEF_REG = 1 ]; then
 						This is an auto-generated commit"
 	fi
 
-        if [ $KSU = 1 ]
-	then
-           for patch_file in $KERNEL_DIR/patchs/KernelSU.patch
-	do
-           patch -p1 < "$patch_file"
-        done
-        fi
+        cp -r "$WORKDIR/patchs" "$KERNEL_DIR/"
 
-        if [ $KSU = 1 ]
-	then
-           for patch1_file in $KERNEL_DIR/patchs/KernelSU_umount.patch
-	do
-           patch -p1 < "$patch1_file"
-        done
-        fi 
+if [ "$KSU" = "1" ]
+then
+    for patch_file in "$KERNEL_DIR/patchs/KernelSU.patch"
+    do
+        patch -p1 < "$patch_file"
+    done
 
-	BUILD_START=$(date +"%s")
+    for patch1_file in "$KERNEL_DIR/patchs/KernelSU_umount.patch"
+    do
+        patch -p1 < "$patch1_file"
+    done
+fi
+
+BUILD_START=$(date +"%s")
 
 	if [ $COMPILER = "clang" ]
 	then
