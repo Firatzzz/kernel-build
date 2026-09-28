@@ -36,7 +36,9 @@ AUTHOR="Firatz"
 MODEL="Redmi 10C"
 DEVICE="fog"
 
+# Sama seperti build.sh sebelumnya: bengal-perf_defconfig + fragment fog.config
 DEFCONFIG="${DEFCONFIG:-vendor/bengal-perf_defconfig}"
+FOG_CFG="${FOG_CFG:-vendor/xiaomi/fog.config}"
 
 # NadekoSU. 1 = YES | 0 = NO
 KSU="${KSU:-1}"
@@ -186,6 +188,23 @@ validate_defconfig()
 	fi
 	echo "[+] Defconfig dipakai: $DEFCONFIG"
 
+	# Fragment khusus fog (dari build.sh sebelumnya)
+	if [ -f "$cfg_dir/$FOG_CFG" ]; then
+		echo "[+] Fragment fog dipakai: $FOG_CFG"
+	else
+		echo "[!] $FOG_CFG tidak ada, mencari file *fog* di configs..."
+		find "$cfg_dir" -iname '*fog*' 2>/dev/null | head -n 20 || true
+		local alt
+		alt="$(find "$cfg_dir" -iname 'fog*.config' 2>/dev/null | head -n1 || true)"
+		if [ -n "$alt" ]; then
+			FOG_CFG="${alt#"$cfg_dir"/}"
+			echo "[+] Fragment fog pengganti: $FOG_CFG"
+		else
+			echo "[!] Tidak ada fragment fog, lanjut hanya dengan $DEFCONFIG"
+			FOG_CFG=""
+		fi
+	fi
+
 	ls "$cfg_dir/vendor" 2>/dev/null | grep -E '\.config$' || true
 	ls "$cfg_dir/vendor/xiaomi" 2>/dev/null | head -n 30 || true
 }
@@ -332,7 +351,9 @@ build_kernel()
 
 	# Fragment: fog.config; ksu.config HANYA untuk mode branchlink
 	local FRAGS=()
-	[ -f arch/arm64/configs/vendor/xiaomi/fog.config ] && FRAGS+=(arch/arm64/configs/vendor/xiaomi/fog.config)
+	if [ -n "$FOG_CFG" ] && [ -f "arch/arm64/configs/$FOG_CFG" ]; then
+		FRAGS+=("arch/arm64/configs/$FOG_CFG")
+	fi
 	if [ "$KSU" = "1" ] && [ "$KSU_HOOK" = "branchlink" ] && [ -f arch/arm64/configs/vendor/ksu.config ]; then
 		FRAGS+=(arch/arm64/configs/vendor/ksu.config)
 	fi
