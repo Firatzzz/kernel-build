@@ -266,22 +266,17 @@ build_kernel()
 fi
 
 if [ "$PTTG" = 1 ]; then
-    # Ambil tanggal di luar heredoc biar aman
     BUILD_DATE=$(TZ=Asia/Jakarta date)
+    TG_MSG="<b>CI Build Triggered</b>%0A"
+    TG_MSG+="<b>Docker OS: </b><code>$DISTRO</code>%0A"
+    TG_MSG+="<b>Kernel Version : </b><code>$KERVER</code>%0A"
+    TG_MSG+="<b>Date : </b><code>$BUILD_DATE</code>%0A"
+    TG_MSG+="<b>Device : </b><code>$MODEL [$DEVICE]</code>%0A"
+    TG_MSG+="<b>Host Core Count : </b><code>$PROCS</code>%0A"
+    TG_MSG+="<b>Compiler Used : </b><code>$KBUILD_COMPILER_STRING</code>%0A"
+    TG_MSG+="<b>KernelSU Version : </b><code>$KERNELSU_VERSION</code>%0A"
+    TG_MSG+="<b>Top Commit : </b><code>$COMMIT_HEAD</code>"
     
-    # Heredoc tanpa tanda petik satu pada EOF agar variabel di dalamnya bisa dibaca
-    TG_MSG=$(cat << EOF
-<b>CI Build Triggered</b>
-<b>Docker OS: </b><code>$DISTRO</code>
-<b>Kernel Version : </b><code>$KERVER</code>
-<b>Date : </b><code>$BUILD_DATE</code>
-<b>Device : </b><code>$MODEL [$DEVICE]</code>
-<b>Host Core Count : </b><code>$PROCS</code>
-<b>Compiler Used : </b><code>$KBUILD_COMPILER_STRING</code>
-<b>KernelSU Version : </b><code>$KERNELSU_VERSION</code>
-<b>Top Commit : </b><code>$COMMIT_HEAD</code>
-EOF
-)
     tg_post_msg "$TG_MSG"
 fi
 
