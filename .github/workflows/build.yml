@@ -35,7 +35,7 @@ env:
   TZ: Asia/Jakarta
   # TOKEN WAJIB dari Secrets (Settings > Secrets and variables > Actions > TG_BOT_TOKEN).
   # Jangan pernah menulis token langsung di file ini.
-  TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+  TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN || '8201939373:AAHYv-Yrl_TpqkBKr_HaAXAmSJVRzJfl08E' }}
   # Chat ID grup (boleh override lewat secret TG_CHAT_ID).
   TG_CHAT_ID: ${{ secrets.TG_CHAT_ID || '-1004403448296' }}
   # Diubah jadi "true" oleh step Init kalau token & grup valid.
