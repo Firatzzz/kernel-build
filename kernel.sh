@@ -112,6 +112,7 @@ then
 curl -LSs "https://raw.githubusercontent.com/dre698/NadekoSU/main/kernel/setup.sh" | bash -
 KSU_GIT_VERSION=$(cd KernelSU && git rev-list --count HEAD)
 KERNELSU_VERSION=$((33300 + $KSU_GIT_VERSION))
+DEFCONFIG="$DEFCONFIG vendor/ksu.config"
 fi
 
 # Sign the zipfile
@@ -295,16 +296,7 @@ if [ $DEF_REG = 1 ]; then
 						This is an auto-generated commit"
 	fi
 
-        cp -r "$WORKDIR/patchs" "$KERNEL_DIR/"
-
-if [ "$KSU" = "1" ]
-then
-    for patch_file in "$KERNEL_DIR/patchs/KernelSU.patch"
-    do
-        patch -p1 < "$patch_file"
-    done
-
-fi
+# KernelSU.patch removed: NadekoSU hooks via CONFIG_KSU_HACK_ARM64_BRANCH_LINK (vendor/ksu.config)
 
 BUILD_START=$(date +"%s")
 
