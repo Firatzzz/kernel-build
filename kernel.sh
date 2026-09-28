@@ -111,7 +111,7 @@ if [ $KSU = 1 ]
 then
 # Remove old KernelSU checkout so ReSukiSU is cloned fresh
 rm -rf KernelSU drivers/kernelsu
-curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s builtin
+curl -LSs "https://raw.githubusercontent.com/dre698/NadekoSU/main/kernel/setup.sh" | bash -s builtin
 KSU_GIT_VERSION=$(cd KernelSU && git rev-list --count HEAD)
 KERNELSU_VERSION=$((33300 + $KSU_GIT_VERSION))
 fi
