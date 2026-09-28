@@ -1,21 +1,209 @@
-name: Kramel build
+name: Build Shisouka Kernel
+
+# Simpan file ini di repo Firatzzz/kernel-build:
+#   .github/workflows/build-kernel.yml
+#
+# Token bot sudah ditanam di bagian env (TG_BOT_TOKEN).
+# Secret yang masih perlu dibuat (Settings > Secrets and variables > Actions):
+#   TG_CHAT_ID    -> chat ID / channel tujuan upload
 
 on:
+  # Otomatis jalan setiap ada commit baru di repo kernel-build
+  push:
+    branches: [master, main]
+    paths-ignore:
+      - "**.md"
+  # Bisa dijalankan manual dari tab Actions
   workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch source kernel (kosongkan = default branch)"
+        required: false
+        default: ""
+      ksu:
+        description: "Aktifkan KernelSU"
+        type: boolean
+        default: true
+  # Opsional: build terjadwal (hapus tanda # untuk mengaktifkan)
+  # schedule:
+  #   - cron: "0 17 * * 6"
+
+concurrency:
+  group: kernel-build
+  cancel-in-progress: true
+
+env:
+  KERNEL_REPO: https://github.com/Firatzzz/kernel_xiaomi_sm6225
+  ANYKERNEL_REPO: https://github.com/Kentanglu/AnyKernel3-680
+  CLANG_URL: https://github.com/ZyCromerZ/Clang/releases/download/17.0.0-20230725-release/Clang-17.0.0-20230725.tar.gz
+  GCC64_REPO: https://github.com/ZyCromerZ/aarch64-linux-android-4.9
+  GCC32_REPO: https://github.com/ZyCromerZ/arm-linux-androideabi-4.9
+  DEFCONFIG: vendor/fog-perf_defconfig
+  KERNEL_NAME: Shisouka-Kernel
+  DEVICE: fog
+  MODEL: Redmi 10C
+  BUILD_USER: Firatz
+  TZ: Asia/Jakarta
+  TG_BOT_TOKEN: "8201939373:AAGFCtshkYHYY3rqC14C0sluE2qtHISXHcs"
+  TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+  USE_KSU: ${{ github.event_name != 'workflow_dispatch' || inputs.ksu }}
 
 jobs:
-  kernel-build:
-    runs-on: ubuntu-latest
-    container:
-      image: ubuntu:jammy-20231004
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
     steps:
-    - uses: actions/checkout@v2
-    - name: Setup CI
-      run: |
-        cp -af sources.list /etc/apt/ &&  cp -af 99own /etc/apt/apt.conf.d/
-        apt-get autoremove -y && apt-get --purge remove -y && apt-get autoclean -y && apt-get update -y && apt-get upgrade -y && apt-get dist-upgrade -y
-        dpkg-reconfigure -a && dpkg --configure -a
-        ln -fs /usr/share/zoneinfo/Asia/Jakarta /etc/localtime && date
-        apt-get -y install -f cpio gcc llvm lld g++-multilib python2 clang git libxml2 python3-pip gcc llvm lld g++-multilib clang default-jre git automake lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libbz2-1.0 libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng bc libstdc++6 libncurses5 wget python3 python3-pip gcc clang libssl-dev rsync flex git-lfs libz3-dev libz3-4 axel tar bc binutils-dev bison build-essential ca-certificates ccache clang cmake curl file flex git libelf-dev libssl-dev lld make ninja-build python3-dev texinfo u-boot-tools xz-utils zlib1g-dev && python3 -m pip install networkx
-    - name: Build Kernel
-      run: bash kernel.sh
+      - name: Checkout kernel-build repo
+        uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+          df -h /
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev libelf-dev libncurses-dev \
+            build-essential ccache zip unzip curl wget git python3 \
+            cpio lz4 xz-utils libtinfo5 perl
+
+      - name: Clone kernel source
+        run: |
+          BRANCH="${{ inputs.branch }}"
+          git clone --depth=1 ${BRANCH:+-b "$BRANCH"} "$KERNEL_REPO" "$HOME/kernel"
+          cd "$HOME/kernel"
+          echo "COMMIT_SHORT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          echo "COMMIT_MSG=$(git log -1 --pretty=%s)" >> "$GITHUB_ENV"
+          echo "KERNEL_VER=$(make kernelversion)" >> "$GITHUB_ENV"
+
+      - name: Setup toolchain and AnyKernel3
+        run: |
+          mkdir -p "$HOME/tc/clang"
+          wget -q "$CLANG_URL" -O "$HOME/clang.tar.gz"
+          tar -xf "$HOME/clang.tar.gz" -C "$HOME/tc/clang"
+          rm -f "$HOME/clang.tar.gz"
+          git clone --depth=1 "$GCC64_REPO" "$HOME/tc/gcc64"
+          git clone --depth=1 "$GCC32_REPO" "$HOME/tc/gcc32"
+          git clone --depth=1 "$ANYKERNEL_REPO" -b master "$HOME/AnyKernel3"
+
+      - name: Patch KernelSU
+        if: env.USE_KSU == 'true'
+        run: |
+          cd "$HOME/kernel"
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
+          KSU_COUNT=$(cd KernelSU && git rev-list --count HEAD 2>/dev/null || echo 0)
+          echo "KSU_VERSION=$((KSU_COUNT + 10200))" >> "$GITHUB_ENV"
+
+      - name: Notify Telegram (build started)
+        run: |
+          KSU_TEXT="Off"
+          [ "$USE_KSU" = "true" ] && KSU_TEXT="On (v${KSU_VERSION})"
+          curl -s "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TG_CHAT_ID}" \
+            -d parse_mode=HTML \
+            -d disable_web_page_preview=true \
+            --data-urlencode text="<b>${KERNEL_NAME} build started</b>
+          <b>Device:</b> <code>${MODEL} (${DEVICE})</code>
+          <b>Kernel:</b> <code>${KERNEL_VER}</code>
+          <b>KernelSU:</b> <code>${KSU_TEXT}</code>
+          <b>Commit:</b> <code>${COMMIT_SHORT} - ${COMMIT_MSG}</code>
+          <b>Run:</b> <a href=\"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\">#${GITHUB_RUN_NUMBER}</a>" \
+            > /dev/null
+
+      - name: Notify Telegram (compiling)
+        run: |
+          curl -s "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TG_CHAT_ID}" \
+            --data-urlencode text="[2/3] Toolchain siap, kernel mulai dikompilasi..." > /dev/null || true
+
+      - name: Compile kernel
+        run: |
+          set -o pipefail
+          cd "$HOME/kernel"
+
+          TC="$HOME/tc"
+          export PATH="$TC/clang/bin:$TC/gcc64/bin:$TC/gcc32/bin:$PATH"
+          export LD_LIBRARY_PATH="$TC/clang/lib:$TC/gcc64/lib:$TC/gcc32/lib:${LD_LIBRARY_PATH:-}"
+          export ARCH=arm64 SUBARCH=arm64
+          export KBUILD_BUILD_USER="$BUILD_USER"
+          export KBUILD_BUILD_HOST="github-actions"
+          export LOCALVERSION="-${KERNEL_NAME}"
+
+          MAKE_ARGS=(
+            O=out
+            ARCH=arm64
+            CC=clang
+            LLVM_IAS=1
+            PYTHON=python3
+            CROSS_COMPILE=aarch64-linux-android-
+            CROSS_COMPILE_ARM32=arm-linux-androideabi-
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            AR=llvm-ar
+            NM=llvm-nm
+            OBJDUMP=llvm-objdump
+            STRIP=llvm-strip
+            LD=aarch64-linux-android-ld
+            HOSTLD="$TC/clang/bin/ld"
+          )
+
+          rm -rf out
+          make "${MAKE_ARGS[@]}" "$DEFCONFIG"
+
+          START=$(date +%s)
+          make -j"$(nproc --all)" "${MAKE_ARGS[@]}" 2>&1 | tee "$GITHUB_WORKSPACE/error.log"
+          END=$(date +%s)
+
+          echo "BUILD_TIME=$(( (END - START) / 60 ))m $(( (END - START) % 60 ))s" >> "$GITHUB_ENV"
+          test -f out/arch/arm64/boot/Image.gz
+
+      - name: Create flashable zip
+        run: |
+          DATE=$(date +"%Y%m%d-%H%M")
+          ZIP_NAME="${KERNEL_NAME}-${DEVICE}"
+          [ "$USE_KSU" = "true" ] && ZIP_NAME="${ZIP_NAME}-KSU"
+          ZIP_NAME="${ZIP_NAME}-${DATE}-${COMMIT_SHORT}.zip"
+
+          cp "$HOME/kernel/out/arch/arm64/boot/Image.gz" "$HOME/AnyKernel3/Image.gz"
+          cd "$HOME/AnyKernel3"
+          zip -r9 "$GITHUB_WORKSPACE/$ZIP_NAME" . -x ".git*" -x "README.md" -x "*.zip"
+
+          echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
+          echo "ZIP_MD5=$(md5sum "$GITHUB_WORKSPACE/$ZIP_NAME" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+
+      - name: Notify Telegram (packaging)
+        run: |
+          curl -s "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TG_CHAT_ID}" \
+            --data-urlencode text="[3/3] Kompilasi selesai (${BUILD_TIME}), mengunggah zip..." > /dev/null || true
+
+      - name: Upload zip to Telegram
+        run: |
+          curl -s -F document=@"$GITHUB_WORKSPACE/$ZIP_NAME" \
+            "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
+            -F chat_id="${TG_CHAT_ID}" \
+            -F parse_mode=HTML \
+            -F caption="<b>${KERNEL_NAME}</b> for ${MODEL}
+          Build time: <code>${BUILD_TIME}</code>
+          Commit: <code>${COMMIT_SHORT}</code>
+          MD5: <code>${ZIP_MD5}</code>" \
+            > /dev/null
+
+      - name: Upload artifact to GitHub
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ github.workspace }}/*.zip
+          retention-days: 14
+
+      - name: Upload error log to Telegram (on failure)
+        if: failure()
+        run: |
+          curl -s -F document=@"$GITHUB_WORKSPACE/error.log" \
+            "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
+            -F chat_id="${TG_CHAT_ID}" \
+            -F caption="${KERNEL_NAME} build FAILED - run #${GITHUB_RUN_NUMBER}" \
+            > /dev/null || true
