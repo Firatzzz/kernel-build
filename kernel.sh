@@ -53,7 +53,7 @@ KERNEL_DIR="$(pwd)"
 BASEDIR="$(basename "$KERNEL_DIR")"
 
 # The name of the Kernel, to name the ZIP
-ZIPNAME="Clover-test-v1"
+ZIPNAME="Severn-v1"
 
 # Build Author
 # Take care, it should be a universal and most probably, case-sensitive
