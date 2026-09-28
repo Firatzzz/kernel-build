@@ -109,11 +109,20 @@ BUILD_DTBO=0
 KSU=1
 if [ $KSU = 1 ]
 then
+# kernel_fog ships an old vendored KernelSU/ copy, setup.sh would reuse it instead of cloning NadekoSU
+rm -rf KernelSU drivers/kernelsu
 curl -LSs "https://raw.githubusercontent.com/dre698/NadekoSU/main/kernel/setup.sh" | bash -
 KSU_GIT_VERSION=$(cd KernelSU && git rev-list --count HEAD)
 KERNELSU_VERSION=$((33300 + $KSU_GIT_VERSION))
-# NadekoSU hooks via CONFIG_KSU_HACK_ARM64_BRANCH_LINK, no source patch needed
-DEFCONFIG="$DEFCONFIG vendor/ksu.config"
+# Pick hook method depending on what this NadekoSU version supports
+if grep -q "KSU_MANUAL_HOOK" KernelSU/kernel/Kconfig
+then
+	KSU_HOOK=manual
+else
+	KSU_HOOK=branchlink
+	DEFCONFIG="$DEFCONFIG vendor/ksu.config"
+fi
+echo "[+] KernelSU hook method: $KSU_HOOK"
 fi
 
 # Sign the zipfile
@@ -287,6 +296,15 @@ make O=out $DEFCONFIG
 
 # Disable 32-bit compat vDSO (fails to build with clang: __NR_compat_* undeclared)
 scripts/config --file out/.config -d COMPAT_VDSO
+if [ "$KSU" = "1" ] && [ "$KSU_HOOK" = "manual" ]
+then
+	scripts/config --file out/.config \
+		-e KSU -e KSU_MANUAL_HOOK \
+		-e KSU_MANUAL_HOOK_AUTO_INPUT_HOOK \
+		-e KSU_MANUAL_HOOK_AUTO_SETUID_HOOK \
+		-e KSU_MANUAL_HOOK_AUTO_INITRC_HOOK \
+		-d KSU_HACK_ARM64_BRANCH_LINK
+fi
 make O=out olddefconfig
 if [ $DEF_REG = 1 ]; then
 
@@ -297,6 +315,17 @@ if [ $DEF_REG = 1 ]; then
 						This is an auto-generated commit"
 	fi
 
+
+if [ "$KSU" = "1" ] && [ "$KSU_HOOK" = "manual" ]
+then
+	cp -r "$WORKDIR/patchs" "$KERNEL_DIR/"
+	patch -p1 < "$KERNEL_DIR/patchs/KernelSU.patch"
+	# static symbol export (KALLSYMS_ALL gets dropped without DEBUG_KERNEL)
+	sed -i 's/^static const struct file_operations sel_handle_status_ops/const struct file_operations sel_handle_status_ops/' security/selinux/selinuxfs.c
+	sed -i 's/^static ssize_t (\*const write_op\[\])/ssize_t (*const write_op[])/' security/selinux/selinuxfs.c
+	sed -i 's/^static void security_dump_masked_av(/void security_dump_masked_av(/' security/selinux/ss/services.c
+	sed -i 's/^static void context_struct_compute_av(/void context_struct_compute_av(/' security/selinux/ss/services.c
+fi
 
 BUILD_START=$(date +"%s")
 
