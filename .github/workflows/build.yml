@@ -2,20 +2,64 @@ name: Kramel build
 
 on:
   workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch source kernel (kosong = default branch)"
+        required: false
+        default: ""
+      defconfig:
+        description: "Defconfig (relatif terhadap arch/arm64/configs)"
+        required: false
+        default: "vendor/bengal-perf_defconfig"
+      use_ksu:
+        description: "Aktifkan KernelSU"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
 
 jobs:
   kernel-build:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     container:
       image: ubuntu:jammy-20231004
+    env:
+      # Token & chat id dibaca kernel.sh. Kalau secret kosong, kernel.sh memakai nilai bawaannya.
+      TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+      TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+      KERNEL_BRANCH: ${{ inputs.branch }}
+      DEFCONFIG: ${{ inputs.defconfig }}
+      KSU: ${{ inputs.use_ksu == false && '0' || '1' }}
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
+
     - name: Setup CI
       run: |
-        cp -af sources.list /etc/apt/ &&  cp -af 99own /etc/apt/apt.conf.d/
+        export DEBIAN_FRONTEND=noninteractive
+        if [ -f sources.list ]; then cp -af sources.list /etc/apt/; fi
+        if [ -f 99own ]; then cp -af 99own /etc/apt/apt.conf.d/; fi
         apt-get autoremove -y && apt-get --purge remove -y && apt-get autoclean -y && apt-get update -y && apt-get upgrade -y && apt-get dist-upgrade -y
         dpkg-reconfigure -a && dpkg --configure -a
         ln -fs /usr/share/zoneinfo/Asia/Jakarta /etc/localtime && date
         apt-get -y install -f cpio gcc llvm lld g++-multilib python2 clang git libxml2 python3-pip gcc llvm lld g++-multilib clang default-jre git automake lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libbz2-1.0 libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng bc libstdc++6 libncurses5 wget python3 python3-pip gcc clang libssl-dev rsync flex git-lfs libz3-dev libz3-4 axel tar bc binutils-dev bison build-essential ca-certificates ccache clang cmake curl file flex git libelf-dev libssl-dev lld make ninja-build python3-dev texinfo u-boot-tools xz-utils zlib1g-dev && python3 -m pip install networkx
+
     - name: Build Kernel
       run: bash kernel.sh
+
+    - name: Upload zip as GitHub artifact
+      if: success()
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-zip-${{ github.run_number }}
+        path: output/*.zip
+        if-no-files-found: error
+
+    - name: Upload log as GitHub artifact
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: error-log-${{ github.run_number }}
+        path: error.log
+        if-no-files-found: ignore
