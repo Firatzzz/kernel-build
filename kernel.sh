@@ -315,6 +315,11 @@ then
     do
         patch -p1 < "$patch_file"
     done
+    # ReSukiSU static symbol export (needed because KALLSYMS_ALL is dropped without DEBUG_KERNEL)
+    sed -i 's/^static const struct file_operations sel_handle_status_ops/const struct file_operations sel_handle_status_ops/' security/selinux/selinuxfs.c
+    sed -i 's/^static ssize_t (\*const write_op\[\])/ssize_t (*const write_op[])/' security/selinux/selinuxfs.c
+    sed -i 's/^static void security_dump_masked_av(/void security_dump_masked_av(/' security/selinux/ss/services.c
+    sed -i 's/^static void context_struct_compute_av(/void context_struct_compute_av(/' security/selinux/ss/services.c
 
 fi
 
