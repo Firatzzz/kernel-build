@@ -92,7 +92,8 @@ if [ $PTTG = 1 ]
 then
 	# Set Telegram Chat ID
 	CHATID="-1003984906981"
-	TOKEN="8958541727:AAFJuU7mysRCS6TlXQtqZvrrR-pJd3zvt9c
+	TOKEN="8958541727:AAFJuU7mysRCS6TlXQtqZvrrR-pJd3zvt9c"
+fi
 
 # Generate a full DEFCONFIG prior building. 1 is YES | 0 is NO(default)
 DEF_REG=0
@@ -235,7 +236,7 @@ tg_post_msg()
 {
 	curl -s -X POST "$BOT_MSG_URL" -d chat_id="$CHATID" \
 	-d "disable_web_page_preview=true" \
-	-d "parse_mode=html" \
+	-d "parse_mode=Markdown" \
 	-d text="$1"
 
 }
@@ -267,15 +268,15 @@ fi
 
 if [ "$PTTG" = 1 ]; then
     BUILD_DATE=$(TZ=Asia/Jakarta date)
-    TG_MSG="<b>CI Build Triggered</b>%0A"
-    TG_MSG+="<b>Docker OS: </b><code>$DISTRO</code>%0A"
-    TG_MSG+="<b>Kernel Version : </b><code>$KERVER</code>%0A"
-    TG_MSG+="<b>Date : </b><code>$BUILD_DATE</code>%0A"
-    TG_MSG+="<b>Device : </b><code>$MODEL [$DEVICE]</code>%0A"
-    TG_MSG+="<b>Host Core Count : </b><code>$PROCS</code>%0A"
-    TG_MSG+="<b>Compiler Used : </b><code>$KBUILD_COMPILER_STRING</code>%0A"
-    TG_MSG+="<b>KernelSU Version : </b><code>$KERNELSU_VERSION</code>%0A"
-    TG_MSG+="<b>Top Commit : </b><code>$COMMIT_HEAD</code>"
+    TG_MSG="*CI Build Triggered*%0A"
+    TG_MSG+="*Docker OS:* \`$DISTRO\`%0A"
+    TG_MSG+="*Kernel Version:* \`$KERVER\`%0A"
+    TG_MSG+="*Date:* \`$BUILD_DATE\`%0A"
+    TG_MSG+="*Device:* \`$MODEL [$DEVICE]\`%0A"
+    TG_MSG+="*Host Core Count:* \`$PROCS\`%0A"
+    TG_MSG+="*Compiler Used:* \`$KBUILD_COMPILER_STRING\`%0A"
+    TG_MSG+="*KernelSU Version:* \`$KERNELSU_VERSION\`%0A"
+    TG_MSG+="*Top Commit:* \`$COMMIT_HEAD\`"
     
     tg_post_msg "$TG_MSG"
 fi
@@ -362,7 +363,7 @@ if [ $DEF_REG = 1 ]; then
 			if [ $BUILD_DTBO = 1 ]
 			then
 				msger -n "|| Building DTBO ||"
-				tg_post_msg "<code>Building DTBO..</code>"
+				tg_post_msg "\`Building DTBO..\`"
 				python2 "$KERNEL_DIR/scripts/ufdt/libufdt/utils/src/mkdtboimg.py" \
 					create "$KERNEL_DIR/out/arch/arm64/boot/dtbo.img" --page_size=4096 "$KERNEL_DIR/out/arch/arm64/boot/dts/$DTBO_PATH"
 			fi
@@ -398,7 +399,7 @@ gen_zip()
 		if [ "$PTTG" = 1 ]
  		then
  			msger -n "|| Signing Zip ||"
-			tg_post_msg "<code>Signing Zip file with AOSP keys..</code>"
+			tg_post_msg "\`Signing Zip file with AOSP keys..\`"
  		fi
 		curl -sLo zipsigner-3.0.jar https://github.com/Magisk-Modules-Repo/zipsigner/raw/master/bin/zipsigner-3.0-dexed.jar
 		java -jar zipsigner-3.0.jar "$ZIP_FINAL".zip "$ZIP_FINAL"-signed.zip
