@@ -25,7 +25,6 @@ env:
   CLANG_URL: https://github.com/ZyCromerZ/Clang/releases/download/17.0.0-20230725-release/Clang-17.0.0-20230725.tar.gz
   GCC64_REPO: https://github.com/ZyCromerZ/aarch64-linux-android-4.9
   GCC32_REPO: https://github.com/ZyCromerZ/arm-linux-androideabi-4.9
-  # FIX 1: fog-perf_defconfig TIDAK ADA di source. Redmi 10C (SM6225) memakai bengal.
   DEFCONFIG: ${{ inputs.defconfig || 'vendor/bengal-perf_defconfig' }}
   USE_KSU: ${{ inputs.use_ksu == false && 'false' || 'true' }}
   INPUT_BRANCH: ${{ inputs.branch }}
@@ -34,10 +33,13 @@ env:
   MODEL: Redmi 10C
   BUILD_USER: Firatz
   TZ: Asia/Jakarta
-  # FIX 2: token/chat id jangan ditulis di file ini. Simpan di
-  # Settings > Secrets and variables > Actions.
-  TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN || '8201939373:AAHYv-Yrl_TpqkBKr_HaAXAmSJVRzJfl08E' }}
-  TG_CHAT_ID: ${{ secrets.TG_CHAT_ID || '5707502727' }}
+  # TOKEN WAJIB dari Secrets (Settings > Secrets and variables > Actions > TG_BOT_TOKEN).
+  # Jangan pernah menulis token langsung di file ini.
+  TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+  # Chat ID grup (boleh override lewat secret TG_CHAT_ID).
+  TG_CHAT_ID: ${{ secrets.TG_CHAT_ID || '-1004403448296' }}
+  # Diubah jadi "true" oleh step Init kalau token & grup valid.
+  TG_ENABLED: "false"
 
 jobs:
   build:
@@ -45,51 +47,68 @@ jobs:
     timeout-minutes: 180
     defaults:
       run:
-        # FIX 3: 'shell: bash' eksplisit = -eo pipefail, sehingga
-        # `make | tee` tidak menyembunyikan error kompilasi.
         shell: bash
 
     steps:
       - name: Checkout kernel-build repo
         uses: actions/checkout@v4
 
-      - name: Init log file
+      - name: Init log file and Telegram helper
         run: |
           : > "$GITHUB_WORKSPACE/error.log"
+
+          # Helper Telegram: memakai sumber (source) di step lain.
+          # Error dari Telegram ditampilkan sebagai warning, bukan disembunyikan.
+          cat > "$HOME/tg.sh" <<'EOF'
+          tg_api() {
+            local method="$1"; shift
+            local out
+            out="$(curl -sS --max-time 120 "https://api.telegram.org/bot${TG_BOT_TOKEN}/${method}" "$@" 2>&1)" || true
+            if echo "$out" | grep -q '"ok":true'; then
+              return 0
+            fi
+            echo "::warning::Telegram ${method} GAGAL: $(echo "$out" | head -c 400)"
+            return 1
+          }
+          tg_msg() {
+            [ "$TG_ENABLED" = "true" ] || return 0
+            tg_api sendMessage \
+              -d chat_id="$TG_CHAT_ID" -d parse_mode=HTML -d disable_web_page_preview=true \
+              --data-urlencode text="$1"
+          }
+          tg_doc() {
+            [ "$TG_ENABLED" = "true" ] || return 0
+            tg_api sendDocument \
+              -F chat_id="$TG_CHAT_ID" -F parse_mode=HTML \
+              -F document=@"$1" -F caption="$2"
+          }
+          esc() { sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
+          EOF
+          # (baris di dalam heredoc otomatis rata kiri oleh YAML)
 
           if [ -z "$TG_BOT_TOKEN" ]; then
             echo "::warning::Secret TG_BOT_TOKEN kosong. Notifikasi Telegram dilewati."
             exit 0
           fi
 
-          # Cek token valid
-          if ! curl -s "https://api.telegram.org/bot${TG_BOT_TOKEN}/getMe" | grep -q '"ok":true'; then
-            echo "::warning::TG_BOT_TOKEN tidak valid (format harus angka:huruf). Notifikasi dilewati."
-            echo "TG_BOT_TOKEN=" >> "$GITHUB_ENV"
+          # 1) Cek token
+          RESP="$(curl -sS --max-time 30 "https://api.telegram.org/bot${TG_BOT_TOKEN}/getMe" 2>&1 || true)"
+          if ! echo "$RESP" | grep -q '"ok":true'; then
+            echo "::warning::TG_BOT_TOKEN ditolak Telegram (kemungkinan sudah dicabut/salah): $(echo "$RESP" | head -c 300)"
             exit 0
           fi
+          echo "Bot OK: $(echo "$RESP" | grep -o '"username":"[^"]*"')"
 
-          # Kalau TG_CHAT_ID belum diisi, ambil otomatis dari pesan terakhir ke bot
-          if [ -z "$TG_CHAT_ID" ]; then
-            CID="$(curl -s "https://api.telegram.org/bot${TG_BOT_TOKEN}/getUpdates" | python3 -c '
-          import sys, json
-          try:
-              data = json.load(sys.stdin)
-          except Exception:
-              sys.exit(0)
-          for upd in reversed(data.get("result", [])):
-              for key in ("message", "channel_post", "my_chat_member", "edited_message"):
-                  if key in upd and "chat" in upd[key]:
-                      print(upd[key]["chat"]["id"])
-                      sys.exit(0)
-          ')"
-            if [ -n "$CID" ]; then
-              echo "Chat ID terdeteksi otomatis."
-              echo "TG_CHAT_ID=$CID" >> "$GITHUB_ENV"
-            else
-              echo "::warning::TG_CHAT_ID kosong dan tidak ada pesan ke bot. Kirim /start ke bot lalu jalankan ulang."
-            fi
+          # 2) Cek bot bisa mengakses grup
+          RESP="$(curl -sS --max-time 30 "https://api.telegram.org/bot${TG_BOT_TOKEN}/getChat" -d chat_id="$TG_CHAT_ID" 2>&1 || true)"
+          if ! echo "$RESP" | grep -q '"ok":true'; then
+            echo "::warning::Chat ID $TG_CHAT_ID tidak bisa diakses bot: $(echo "$RESP" | head -c 300)"
+            echo "::warning::Pastikan bot sudah ditambahkan ke grup dan ID grup benar."
+            exit 0
           fi
+          echo "Grup OK: $(echo "$RESP" | grep -o '"title":"[^"]*"')"
+
+          echo "TG_ENABLED=true" >> "$GITHUB_ENV"
 
       - name: Free up disk space
         run: |
@@ -144,7 +163,6 @@ jobs:
           fi
           echo "Defconfig dipakai: $DEFCONFIG"
 
-          # Info tambahan (tidak fatal): fragment config yang tersedia
           ls "$CFG_DIR/vendor" | grep -E '\.config$' || true
           ls "$CFG_DIR/vendor/xiaomi" 2>/dev/null | head -n 30 || true
 
@@ -157,8 +175,6 @@ jobs:
           tar -xf "$HOME/clang.tar.gz" -C "$TC/clang"
           rm -f "$HOME/clang.tar.gz"
 
-          # Tarball bisa flat atau punya folder induk, dan bin/clang biasanya
-          # symlink ke clang-17 (bukan file biasa), jadi jangan pakai -type f saja.
           CLANG_BIN="$(find "$TC/clang" \( -type f -o -type l \) -name clang -path '*/bin/*' | head -n1)"
           if [ -z "$CLANG_BIN" ]; then
             echo "clang tidak ditemukan. Isi hasil ekstrak:"
@@ -180,9 +196,6 @@ jobs:
       - name: Prepare KernelSU
         run: |
           cd "$HOME/kernel"
-          # Source sudah berisi integrasi KernelSU (commit "KernelSU: update ...")
-          # dan punya vendor/ksu.config, jadi JANGAN jalankan setup.sh tiann lagi
-          # karena akan bentrok dengan versi yang sudah ada.
           if [ "$USE_KSU" = "true" ]; then
             if [ -d KernelSU ] || [ -d drivers/kernelsu ]; then
               echo "KSU_TEXT=On" >> "$GITHUB_ENV"
@@ -197,17 +210,15 @@ jobs:
 
       - name: Notify build started
         run: |
-          [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_CHAT_ID" ] || exit 0
-          esc() { sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
+          source "$HOME/tg.sh"
           MSG="$(printf '%s' "$COMMIT_MSG" | esc)"
-          curl -s "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-            -d chat_id="$TG_CHAT_ID" -d parse_mode=HTML -d disable_web_page_preview=true \
-            --data-urlencode text="<b>${KERNEL_NAME} build started</b> - run #${GITHUB_RUN_NUMBER}
-          <b>Device:</b> <code>${MODEL} (${DEVICE})</code>
-          <b>Kernel:</b> <code>${KERNEL_VER}</code>
-          <b>Defconfig:</b> <code>${DEFCONFIG}</code>
-          <b>KernelSU:</b> <code>${KSU_TEXT:-Off}</code>
-          <b>Commit:</b> <code>${COMMIT_SHORT} - ${MSG}</code>" || true
+          tg_msg "$(printf '%s\n' \
+            "<b>${KERNEL_NAME} build started</b> - run #${GITHUB_RUN_NUMBER}" \
+            "<b>Device:</b> <code>${MODEL} (${DEVICE})</code>" \
+            "<b>Kernel:</b> <code>${KERNEL_VER}</code>" \
+            "<b>Defconfig:</b> <code>${DEFCONFIG}</code>" \
+            "<b>KernelSU:</b> <code>${KSU_TEXT:-Off}</code>" \
+            "<b>Commit:</b> <code>${COMMIT_SHORT} - ${MSG}</code>")" || true
 
       - name: Compile kernel
         run: |
@@ -220,8 +231,6 @@ jobs:
           export KBUILD_BUILD_HOST="github-actions"
           export LOCALVERSION="-${KERNEL_NAME}"
 
-          # Mengikuti build.sh upstream source ini (LLVM=1 LLVM_IAS=1).
-          # Tool (ar/nm/ld/...) dibiarkan ditentukan otomatis oleh kbuild.
           ARGS=(
             O=out ARCH=arm64
             LLVM=1 LLVM_IAS=1
@@ -236,7 +245,6 @@ jobs:
           rm -rf out
           make "${ARGS[@]}" "$DEFCONFIG" 2>&1 | tee "$LOG"
 
-          # Gabungkan fragment: konfigurasi khusus fog + KernelSU (bila ada)
           FRAGS=()
           [ -f arch/arm64/configs/vendor/xiaomi/fog.config ] && FRAGS+=(arch/arm64/configs/vendor/xiaomi/fog.config)
           [ "$USE_KSU" = "true" ] && [ -f arch/arm64/configs/vendor/ksu.config ] && FRAGS+=(arch/arm64/configs/vendor/ksu.config)
@@ -246,8 +254,19 @@ jobs:
             make "${ARGS[@]}" olddefconfig
           fi
 
+          if [ "$USE_KSU" = "true" ]; then
+            echo "--- CONFIG KernelSU di out/.config ---"
+            grep -E '^CONFIG_KSU' out/.config || true
+            if grep -Eq '^CONFIG_KSU=y' out/.config; then
+              echo "KernelSU AKTIF (CONFIG_KSU=y)"
+            else
+              echo "::warning::CONFIG_KSU=y tidak ditemukan. Build berjalan TANPA KernelSU."
+              echo "KSU_TEXT=Off (CONFIG_KSU tidak aktif)" >> "$GITHUB_ENV"
+              echo "USE_KSU=false" >> "$GITHUB_ENV"
+            fi
+          fi
+
           START=$(date +%s)
-          # Target sesuai perangkat: kernel + dtb.img + dtbo.img (bukan appended-dtb)
           make -j"$(nproc --all)" "${ARGS[@]}" Image.gz dtb.img dtbo.img 2>&1 | tee -a "$LOG"
           END=$(date +%s)
           echo "BUILD_TIME=$(( (END-START)/60 ))m $(( (END-START)%60 ))s" >> "$GITHUB_ENV"
@@ -270,7 +289,6 @@ jobs:
           [ "$USE_KSU" = "true" ] && NAME="${NAME}-KSU"
           NAME="${NAME}-${STAMP}-${COMMIT_SHORT}.zip"
 
-          # Cek AnyKernel3 memang mendukung perangkat ini
           echo "--- device.name di anykernel.sh ---"
           grep -nE 'device\.name|do\.devicecheck' "$AK3/anykernel.sh" || true
           if ! grep -qiE 'device\.name[0-9]*=(fog|wind|rain)' "$AK3/anykernel.sh"; then
@@ -298,33 +316,47 @@ jobs:
       - name: Send zip to Telegram
         if: success()
         run: |
-          [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_CHAT_ID" ] || exit 0
-          curl -s -F document=@"$GITHUB_WORKSPACE/output/$ZIP_NAME" \
-            "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
-            -F chat_id="$TG_CHAT_ID" -F parse_mode=HTML \
-            -F caption="<b>${KERNEL_NAME}</b> for ${MODEL}
-          Build time: <code>${BUILD_TIME}</code>
-          KernelSU: <code>${KSU_TEXT:-Off}</code>
-          Commit: <code>${COMMIT_SHORT}</code>
-          MD5: <code>${ZIP_MD5}</code>" || true
+          source "$HOME/tg.sh"
+          ZIP="$GITHUB_WORKSPACE/output/$ZIP_NAME"
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          SIZE=$(stat -c%s "$ZIP")
+          echo "Ukuran zip: $SIZE bytes"
+
+          CAPTION="$(printf '%s\n' \
+            "<b>${KERNEL_NAME}</b> for ${MODEL}" \
+            "Build time: <code>${BUILD_TIME}</code>" \
+            "KernelSU: <code>${KSU_TEXT:-Off}</code>" \
+            "Commit: <code>${COMMIT_SHORT}</code>" \
+            "MD5: <code>${ZIP_MD5}</code>")"
+
+          # Batas upload Bot API = 50 MB
+          if [ "$SIZE" -gt 50000000 ]; then
+            tg_msg "$(printf '%s\n' \
+              "<b>${KERNEL_NAME}</b> build SUKSES, tetapi zip &gt; 50MB (tidak bisa dikirim via bot)." \
+              "$CAPTION" \
+              "<a href=\"${RUN_URL}\">Download dari Artifacts</a>")" || true
+          else
+            tg_doc "$ZIP" "$CAPTION" || tg_msg "$(printf '%s\n' \
+              "<b>${KERNEL_NAME}</b> build SUKSES, tetapi upload zip gagal." \
+              "<a href=\"${RUN_URL}\">Download dari Artifacts</a>")" || true
+          fi
 
       - name: Send failure log to Telegram
         if: failure()
         run: |
+          source "$HOME/tg.sh"
           LOG="$GITHUB_WORKSPACE/error.log"
-          [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_CHAT_ID" ] || exit 0
           RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          TAIL=$(tail -n 40 "$LOG" 2>/dev/null | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' | tail -c 3000)
-          curl -s "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-            -d chat_id="$TG_CHAT_ID" -d parse_mode=HTML -d disable_web_page_preview=true \
-            --data-urlencode text="<b>${KERNEL_NAME} build FAILED</b> - run #${GITHUB_RUN_NUMBER}
-          <a href=\"${RUN_URL}\">Buka run</a>
+          TAIL="$(tail -n 40 "$LOG" 2>/dev/null | esc | tail -c 3000)"
 
-          <pre>${TAIL}</pre>" || true
-          [ -s "$LOG" ] && curl -s -F document=@"$LOG" \
-            "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
-            -F chat_id="$TG_CHAT_ID" \
-            -F caption="${KERNEL_NAME} build FAILED - run #${GITHUB_RUN_NUMBER}" || true
+          tg_msg "$(printf '%s\n\n%s\n' \
+            "<b>${KERNEL_NAME} build FAILED</b> - run #${GITHUB_RUN_NUMBER}
+          <a href=\"${RUN_URL}\">Buka run</a>" \
+            "<pre>${TAIL}</pre>")" || true
+
+          if [ -s "$LOG" ]; then
+            tg_doc "$LOG" "${KERNEL_NAME} build FAILED - run #${GITHUB_RUN_NUMBER}" || true
+          fi
 
       - name: Upload log as GitHub artifact (on failure)
         if: failure()
