@@ -42,8 +42,8 @@ env:
   MODEL: Redmi 10C
   BUILD_USER: Firatz
   TZ: Asia/Jakarta
-  TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-  TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+  TG_BOT_TOKEN: "AAG1_BOS9DiUxsDCXTqscwbggHmiB5c3mvA"
+  TG_CHAT_ID: "8201939373"
   USE_KSU: ${{ github.event_name != 'workflow_dispatch' || inputs.ksu }}
 
 jobs:
