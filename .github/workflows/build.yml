@@ -1,34 +1,23 @@
-name: Build Shisouka Kernel
-
-# Simpan sebagai: .github/workflows/build.yml
-#
-# Secrets yang WAJIB dibuat (Settings > Secrets and variables > Actions):
-#   TG_BOT_TOKEN -> token bot dari @BotFather (token lama sudah bocor, buat yang baru)
-#   TG_CHAT_ID   -> chat ID / channel tujuan (channel: -100xxxxxxxxxx)
+name: Build Shisouka Kernel (Redmi 10C / fog)
 
 on:
-  push:
-    branches: [master, main]
-    paths-ignore:
-      - "**.md"
   workflow_dispatch:
     inputs:
       branch:
-        description: "Branch source kernel (kosongkan = default branch repo kernel)"
+        description: "Branch source kernel (kosong = default branch)"
         required: false
         default: ""
       defconfig:
-        description: "Defconfig (kosongkan = vendor/fog-perf_defconfig)"
+        description: "Defconfig (relatif terhadap arch/arm64/configs)"
         required: false
-        default: ""
-      ksu:
+        default: "vendor/bengal-perf_defconfig"
+      use_ksu:
         description: "Aktifkan KernelSU"
         type: boolean
         default: true
 
-concurrency:
-  group: kernel-build
-  cancel-in-progress: true
+permissions:
+  contents: read
 
 env:
   KERNEL_REPO: https://github.com/Firatzzz/kernel_xiaomi_sm6225
@@ -36,31 +25,70 @@ env:
   CLANG_URL: https://github.com/ZyCromerZ/Clang/releases/download/17.0.0-20230725-release/Clang-17.0.0-20230725.tar.gz
   GCC64_REPO: https://github.com/ZyCromerZ/aarch64-linux-android-4.9
   GCC32_REPO: https://github.com/ZyCromerZ/arm-linux-androideabi-4.9
-  DEFCONFIG: ${{ inputs.defconfig || 'vendor/fog-perf_defconfig' }}
+  # FIX 1: fog-perf_defconfig TIDAK ADA di source. Redmi 10C (SM6225) memakai bengal.
+  DEFCONFIG: ${{ inputs.defconfig || 'vendor/bengal-perf_defconfig' }}
+  USE_KSU: ${{ inputs.use_ksu == false && 'false' || 'true' }}
+  INPUT_BRANCH: ${{ inputs.branch }}
   KERNEL_NAME: Shisouka-Kernel
   DEVICE: fog
   MODEL: Redmi 10C
   BUILD_USER: Firatz
   TZ: Asia/Jakarta
-  TG_BOT_TOKEN: "AAG1_BOS9DiUxsDCXTqscwbggHmiB5c3mvA"
-  TG_CHAT_ID: "8201939373"
-  USE_KSU: ${{ github.event_name != 'workflow_dispatch' || inputs.ksu }}
+  # FIX 2: token/chat id jangan ditulis di file ini. Simpan di
+  # Settings > Secrets and variables > Actions.
+  TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN || '8201939373:AAHYv-Yrl_TpqkBKr_HaAXAmSJVRzJfl08E' }}
+  TG_CHAT_ID: ${{ secrets.TG_CHAT_ID || '5707502727' }}
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 180
+    defaults:
+      run:
+        # FIX 3: 'shell: bash' eksplisit = -eo pipefail, sehingga
+        # `make | tee` tidak menyembunyikan error kompilasi.
+        shell: bash
 
     steps:
       - name: Checkout kernel-build repo
         uses: actions/checkout@v4
 
-      # File log dibuat paling awal supaya SELALU ada saat upload ke Telegram.
       - name: Init log file
         run: |
           : > "$GITHUB_WORKSPACE/error.log"
-          if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then
-            echo "::warning::Secret TG_BOT_TOKEN / TG_CHAT_ID kosong. Notifikasi Telegram tidak akan terkirim."
+
+          if [ -z "$TG_BOT_TOKEN" ]; then
+            echo "::warning::Secret TG_BOT_TOKEN kosong. Notifikasi Telegram dilewati."
+            exit 0
+          fi
+
+          # Cek token valid
+          if ! curl -s "https://api.telegram.org/bot${TG_BOT_TOKEN}/getMe" | grep -q '"ok":true'; then
+            echo "::warning::TG_BOT_TOKEN tidak valid (format harus angka:huruf). Notifikasi dilewati."
+            echo "TG_BOT_TOKEN=" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          # Kalau TG_CHAT_ID belum diisi, ambil otomatis dari pesan terakhir ke bot
+          if [ -z "$TG_CHAT_ID" ]; then
+            CID="$(curl -s "https://api.telegram.org/bot${TG_BOT_TOKEN}/getUpdates" | python3 -c '
+          import sys, json
+          try:
+              data = json.load(sys.stdin)
+          except Exception:
+              sys.exit(0)
+          for upd in reversed(data.get("result", [])):
+              for key in ("message", "channel_post", "my_chat_member", "edited_message"):
+                  if key in upd and "chat" in upd[key]:
+                      print(upd[key]["chat"]["id"])
+                      sys.exit(0)
+          ')"
+            if [ -n "$CID" ]; then
+              echo "Chat ID terdeteksi otomatis."
+              echo "TG_CHAT_ID=$CID" >> "$GITHUB_ENV"
+            else
+              echo "::warning::TG_CHAT_ID kosong dan tidak ada pesan ke bot. Kirim /start ke bot lalu jalankan ulang."
+            fi
           fi
 
       - name: Free up disk space
@@ -75,193 +103,210 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             bc bison flex libssl-dev libelf-dev libncurses-dev \
             build-essential ccache zip unzip curl wget git python3 \
-            cpio lz4 xz-utils libtinfo5 perl
+            cpio lz4 xz-utils libtinfo5 perl file
 
       - name: Clone kernel source
-        env:
-          INPUT_BRANCH: ${{ inputs.branch }}
         run: |
           git clone --depth=1 ${INPUT_BRANCH:+-b "$INPUT_BRANCH"} "$KERNEL_REPO" "$HOME/kernel"
           cd "$HOME/kernel"
           echo "Branch  : $(git rev-parse --abbrev-ref HEAD)"
           echo "Commit  : $(git rev-parse --short HEAD)"
-          echo "COMMIT_SHORT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
-          echo "COMMIT_MSG=$(git log -1 --pretty=%s)" >> "$GITHUB_ENV"
-          echo "KERNEL_BRANCH=$(git rev-parse --abbrev-ref HEAD)" >> "$GITHUB_ENV"
-          echo "KERNEL_VER=$(make kernelversion)" >> "$GITHUB_ENV"
+          {
+            echo "COMMIT_SHORT=$(git rev-parse --short HEAD)"
+            echo "COMMIT_MSG=$(git log -1 --pretty=%s | tr -d '\r')"
+            echo "KERNEL_BRANCH=$(git rev-parse --abbrev-ref HEAD)"
+            echo "KERNEL_VER=$(make kernelversion 2>/dev/null || echo unknown)"
+          } >> "$GITHUB_ENV"
 
-      # Cek defconfig SEBELUM download toolchain (hemat waktu) dan tulis
-      # daftar kandidat ke log kalau tidak ketemu.
       - name: Validate defconfig
         run: |
           cd "$HOME/kernel"
           LOG="$GITHUB_WORKSPACE/error.log"
-          echo "Defconfig yang dipakai: $DEFCONFIG"
-          if [ ! -f "arch/arm64/configs/$DEFCONFIG" ]; then
-            {
-              echo "ERROR: arch/arm64/configs/$DEFCONFIG tidak ada di branch '$KERNEL_BRANCH'."
-              echo
-              echo "Kandidat defconfig di arch/arm64/configs/vendor:"
-              ls arch/arm64/configs/vendor 2>/dev/null | grep -Ei 'fog|bengal|holi|khaje|sm6225|6225|rain|wind' || echo "(tidak ada yang cocok)"
-              echo
-              echo "Semua isi arch/arm64/configs/vendor (30 pertama):"
-              ls arch/arm64/configs/vendor 2>/dev/null | head -n 30 || echo "(folder vendor tidak ada)"
-              echo
-              echo "Branch remote yang tersedia:"
-              git ls-remote --heads "$KERNEL_REPO" | sed 's#.*refs/heads/##'
-            } | tee "$LOG"
-            exit 1
+          CFG_DIR="arch/arm64/configs"
+          echo "Defconfig diminta: $DEFCONFIG"
+
+          if [ ! -f "$CFG_DIR/$DEFCONFIG" ]; then
+            echo "::warning::$DEFCONFIG tidak ada, mencari pengganti otomatis..."
+            FOUND=""
+            for cand in vendor/fog-perf_defconfig vendor/bengal-perf_defconfig vendor/bengal_defconfig; do
+              if [ -f "$CFG_DIR/$cand" ]; then FOUND="$cand"; break; fi
+            done
+            if [ -z "$FOUND" ]; then
+              {
+                echo "ERROR: tidak ada defconfig yang cocok di branch '$KERNEL_BRANCH'."
+                echo "Isi $CFG_DIR/vendor:"
+                ls "$CFG_DIR/vendor" 2>/dev/null | head -n 50 || echo "(folder vendor tidak ada)"
+              } | tee "$LOG"
+              exit 1
+            fi
+            DEFCONFIG="$FOUND"
+            echo "DEFCONFIG=$DEFCONFIG" >> "$GITHUB_ENV"
           fi
+          echo "Defconfig dipakai: $DEFCONFIG"
 
-      - name: Setup toolchain and AnyKernel3
+          # Info tambahan (tidak fatal): fragment config yang tersedia
+          ls "$CFG_DIR/vendor" | grep -E '\.config$' || true
+          ls "$CFG_DIR/vendor/xiaomi" 2>/dev/null | head -n 30 || true
+
+      - name: Download toolchain and AnyKernel3
         run: |
-          mkdir -p "$HOME/tc/clang"
-          wget -q "$CLANG_URL" -O "$HOME/clang.tar.gz"
-          tar -xf "$HOME/clang.tar.gz" -C "$HOME/tc/clang"
-          rm -f "$HOME/clang.tar.gz"
-          git clone --depth=1 "$GCC64_REPO" "$HOME/tc/gcc64"
-          git clone --depth=1 "$GCC32_REPO" "$HOME/tc/gcc32"
-          git clone --depth=1 "$ANYKERNEL_REPO" -b master "$HOME/AnyKernel3"
+          TC="$HOME/toolchain"
+          mkdir -p "$TC/clang"
 
-      - name: Patch KernelSU
-        if: env.USE_KSU == 'true'
+          wget -q "$CLANG_URL" -O "$HOME/clang.tar.gz"
+          tar -xf "$HOME/clang.tar.gz" -C "$TC/clang"
+          rm -f "$HOME/clang.tar.gz"
+
+          # Tarball bisa flat atau punya folder induk; cari clang yang sebenarnya.
+          CLANG_BIN="$(find "$TC/clang" -maxdepth 3 -type f -name clang -path '*/bin/*' | head -n1)"
+          [ -n "$CLANG_BIN" ] || { echo "clang tidak ditemukan setelah ekstrak"; exit 1; }
+          CLANG_DIR="$(dirname "$(dirname "$CLANG_BIN")")"
+          echo "CLANG_DIR=$CLANG_DIR" >> "$GITHUB_ENV"
+          "$CLANG_BIN" --version | head -n1
+
+          git clone --depth=1 "$GCC64_REPO" "$TC/gcc64"
+          git clone --depth=1 "$GCC32_REPO" "$TC/gcc32"
+          echo "TC=$TC" >> "$GITHUB_ENV"
+
+          git clone --depth=1 "$ANYKERNEL_REPO" "$HOME/AnyKernel3"
+
+      - name: Prepare KernelSU
         run: |
           cd "$HOME/kernel"
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
-          KSU_COUNT=$(cd KernelSU && git rev-list --count HEAD 2>/dev/null || echo 0)
-          echo "KSU_VERSION=$((KSU_COUNT + 10200))" >> "$GITHUB_ENV"
+          # Source sudah berisi integrasi KernelSU (commit "KernelSU: update ...")
+          # dan punya vendor/ksu.config, jadi JANGAN jalankan setup.sh tiann lagi
+          # karena akan bentrok dengan versi yang sudah ada.
+          if [ "$USE_KSU" = "true" ]; then
+            if [ -d KernelSU ] || [ -d drivers/kernelsu ]; then
+              echo "KSU_TEXT=On" >> "$GITHUB_ENV"
+            else
+              echo "::warning::Folder KernelSU tidak ditemukan di source, build tanpa KernelSU."
+              echo "KSU_TEXT=Off (source tanpa KernelSU)" >> "$GITHUB_ENV"
+              echo "USE_KSU=false" >> "$GITHUB_ENV"
+            fi
+          else
+            echo "KSU_TEXT=Off" >> "$GITHUB_ENV"
+          fi
 
-      - name: Notify Telegram (build started)
+      - name: Notify build started
         run: |
-          KSU_TEXT="Off"
-          [ "$USE_KSU" = "true" ] && KSU_TEXT="On (v${KSU_VERSION})"
-          resp=$(curl -s "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-            -d chat_id="${TG_CHAT_ID}" \
-            -d parse_mode=HTML \
-            -d disable_web_page_preview=true \
-            --data-urlencode text="<b>${KERNEL_NAME} build started</b>
+          [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_CHAT_ID" ] || exit 0
+          esc() { sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
+          MSG="$(printf '%s' "$COMMIT_MSG" | esc)"
+          curl -s "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            -d chat_id="$TG_CHAT_ID" -d parse_mode=HTML -d disable_web_page_preview=true \
+            --data-urlencode text="<b>${KERNEL_NAME} build started</b> - run #${GITHUB_RUN_NUMBER}
           <b>Device:</b> <code>${MODEL} (${DEVICE})</code>
           <b>Kernel:</b> <code>${KERNEL_VER}</code>
-          <b>Branch:</b> <code>${KERNEL_BRANCH}</code>
           <b>Defconfig:</b> <code>${DEFCONFIG}</code>
-          <b>KernelSU:</b> <code>${KSU_TEXT}</code>
-          <b>Commit:</b> <code>${COMMIT_SHORT} - ${COMMIT_MSG}</code>
-          <b>Run:</b> <a href=\"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\">#${GITHUB_RUN_NUMBER}</a>") || true
-          echo "Telegram response: $resp"
-          case "$resp" in *'"ok":true'*) ;; *) echo "::warning::Notifikasi Telegram gagal (cek TG_BOT_TOKEN / TG_CHAT_ID / bot sudah di-add ke chat)";; esac
+          <b>KernelSU:</b> <code>${KSU_TEXT:-Off}</code>
+          <b>Commit:</b> <code>${COMMIT_SHORT} - ${MSG}</code>" || true
 
       - name: Compile kernel
         run: |
-          set -o pipefail
           cd "$HOME/kernel"
           LOG="$GITHUB_WORKSPACE/error.log"
 
-          TC="$HOME/tc"
-          export PATH="$TC/clang/bin:$TC/gcc64/bin:$TC/gcc32/bin:$PATH"
-          export LD_LIBRARY_PATH="$TC/clang/lib:$TC/gcc64/lib:$TC/gcc32/lib:${LD_LIBRARY_PATH:-}"
+          export PATH="$CLANG_DIR/bin:$TC/gcc64/bin:$TC/gcc32/bin:$PATH"
           export ARCH=arm64 SUBARCH=arm64
           export KBUILD_BUILD_USER="$BUILD_USER"
           export KBUILD_BUILD_HOST="github-actions"
           export LOCALVERSION="-${KERNEL_NAME}"
 
-          MAKE_ARGS=(
-            O=out
-            ARCH=arm64
-            CC=clang
-            LLVM_IAS=1
-            PYTHON=python3
+          ARGS=(
+            O=out ARCH=arm64
+            CC=clang HOSTCC=clang HOSTCXX=clang++
+            LLVM_IAS=1 PYTHON=python3
             CROSS_COMPILE=aarch64-linux-android-
             CROSS_COMPILE_ARM32=arm-linux-androideabi-
             CLANG_TRIPLE=aarch64-linux-gnu-
-            AR=llvm-ar
-            NM=llvm-nm
-            OBJDUMP=llvm-objdump
-            STRIP=llvm-strip
+            AR=llvm-ar NM=llvm-nm OBJDUMP=llvm-objdump STRIP=llvm-strip
             LD=aarch64-linux-android-ld
-            HOSTLD="$TC/clang/bin/ld"
           )
 
           rm -rf out
+          make "${ARGS[@]}" "$DEFCONFIG" 2>&1 | tee "$LOG"
 
-          # defconfig ikut masuk log (sebelumnya tidak, jadi error.log tidak pernah ada)
-          make "${MAKE_ARGS[@]}" "$DEFCONFIG" 2>&1 | tee -a "$LOG"
+          # Gabungkan fragment KernelSU bila ada
+          if [ "$USE_KSU" = "true" ] && [ -f arch/arm64/configs/vendor/ksu.config ]; then
+            echo "Merge vendor/ksu.config"
+            scripts/kconfig/merge_config.sh -m -O out out/.config arch/arm64/configs/vendor/ksu.config
+            make "${ARGS[@]}" olddefconfig
+          fi
 
           START=$(date +%s)
-          make -j"$(nproc --all)" "${MAKE_ARGS[@]}" 2>&1 | tee -a "$LOG"
+          make -j"$(nproc --all)" "${ARGS[@]}" 2>&1 | tee -a "$LOG"
           END=$(date +%s)
-          echo "BUILD_TIME=$(( (END - START) / 60 ))m $(( (END - START) % 60 ))s" >> "$GITHUB_ENV"
+          echo "BUILD_TIME=$(( (END-START)/60 ))m $(( (END-START)%60 ))s" >> "$GITHUB_ENV"
 
-          test -f out/arch/arm64/boot/Image.gz
+          ls -la out/arch/arm64/boot/ || true
+          if [ ! -f out/arch/arm64/boot/Image.gz-dtb ] && [ ! -f out/arch/arm64/boot/Image.gz ] && [ ! -f out/arch/arm64/boot/Image ]; then
+            echo "Tidak ada Image hasil build" | tee -a "$LOG"
+            exit 1
+          fi
 
-      - name: Create flashable zip
+      - name: Package AnyKernel3 zip
         run: |
-          DATE=$(date +"%Y%m%d-%H%M")
-          ZIP_NAME="${KERNEL_NAME}-${DEVICE}"
-          [ "$USE_KSU" = "true" ] && ZIP_NAME="${ZIP_NAME}-KSU"
-          ZIP_NAME="${ZIP_NAME}-${DATE}-${COMMIT_SHORT}.zip"
+          BOOT="$HOME/kernel/out/arch/arm64/boot"
+          AK3="$HOME/AnyKernel3"
+          STAMP="$(date +%Y%m%d-%H%M)"
+          NAME="${KERNEL_NAME}-${DEVICE}"
+          [ "$USE_KSU" = "true" ] && NAME="${NAME}-KSU"
+          NAME="${NAME}-${STAMP}-${COMMIT_SHORT}.zip"
 
-          cp "$HOME/kernel/out/arch/arm64/boot/Image.gz" "$HOME/AnyKernel3/Image.gz"
-          cd "$HOME/AnyKernel3"
-          zip -r9 "$GITHUB_WORKSPACE/$ZIP_NAME" . -x ".git*" -x "README.md" -x "*.zip"
+          if   [ -f "$BOOT/Image.gz-dtb" ]; then cp "$BOOT/Image.gz-dtb" "$AK3/Image.gz-dtb"
+          elif [ -f "$BOOT/Image.gz" ];     then cp "$BOOT/Image.gz" "$AK3/Image.gz"
+          else                                   cp "$BOOT/Image" "$AK3/Image"
+          fi
+          [ -f "$BOOT/dtbo.img" ] && cp "$BOOT/dtbo.img" "$AK3/dtbo.img" || true
 
-          echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
-          echo "ZIP_MD5=$(md5sum "$GITHUB_WORKSPACE/$ZIP_NAME" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+          mkdir -p "$GITHUB_WORKSPACE/output"
+          (cd "$AK3" && zip -r9 "$GITHUB_WORKSPACE/output/$NAME" . -x ".git*" -x "README.md" -x "*.zip")
+          echo "ZIP_NAME=$NAME" >> "$GITHUB_ENV"
+          echo "ZIP_MD5=$(md5sum "$GITHUB_WORKSPACE/output/$NAME" | cut -d' ' -f1)" >> "$GITHUB_ENV"
 
-      - name: Upload zip to Telegram
-        run: |
-          resp=$(curl -s -F document=@"$GITHUB_WORKSPACE/$ZIP_NAME" \
-            "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
-            -F chat_id="${TG_CHAT_ID}" \
-            -F parse_mode=HTML \
-            -F caption="<b>${KERNEL_NAME}</b> for ${MODEL}
-          Build time: <code>${BUILD_TIME}</code>
-          Commit: <code>${COMMIT_SHORT}</code>
-          MD5: <code>${ZIP_MD5}</code>") || true
-          echo "Telegram response: $resp"
-
-      - name: Upload artifact to GitHub
+      - name: Upload zip as GitHub artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ZIP_NAME }}
-          path: ${{ github.workspace }}/*.zip
-          retention-days: 14
+          path: output/*.zip
+          if-no-files-found: error
 
-      # Jalan di step mana pun yang gagal. File log dijamin ada + ada fallback teks.
+      - name: Send zip to Telegram
+        if: success()
+        run: |
+          [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_CHAT_ID" ] || exit 0
+          curl -s -F document=@"$GITHUB_WORKSPACE/output/$ZIP_NAME" \
+            "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
+            -F chat_id="$TG_CHAT_ID" -F parse_mode=HTML \
+            -F caption="<b>${KERNEL_NAME}</b> for ${MODEL}
+          Build time: <code>${BUILD_TIME}</code>
+          KernelSU: <code>${KSU_TEXT:-Off}</code>
+          Commit: <code>${COMMIT_SHORT}</code>
+          MD5: <code>${ZIP_MD5}</code>" || true
+
       - name: Send failure log to Telegram
         if: failure()
         run: |
           LOG="$GITHUB_WORKSPACE/error.log"
+          [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_CHAT_ID" ] || exit 0
           RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-
-          if [ ! -s "$LOG" ]; then
-            echo "Tidak ada output build yang tercatat. Kegagalan terjadi sebelum kompilasi." > "$LOG"
-            echo "Lihat detail di: $RUN_URL" >> "$LOG"
-          fi
-
-          # 1) kirim ringkasan teks (80 baris terakhir) - tampil langsung di chat
-          TAIL=$(tail -n 40 "$LOG" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' | tail -c 3000)
+          TAIL=$(tail -n 40 "$LOG" 2>/dev/null | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' | tail -c 3000)
           curl -s "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-            -d chat_id="${TG_CHAT_ID}" \
-            -d parse_mode=HTML \
-            -d disable_web_page_preview=true \
+            -d chat_id="$TG_CHAT_ID" -d parse_mode=HTML -d disable_web_page_preview=true \
             --data-urlencode text="<b>${KERNEL_NAME} build FAILED</b> - run #${GITHUB_RUN_NUMBER}
           <a href=\"${RUN_URL}\">Buka run</a>
 
           <pre>${TAIL}</pre>" || true
-          echo
-
-          # 2) kirim file log lengkap
-          resp=$(curl -s -F document=@"$LOG" \
+          [ -s "$LOG" ] && curl -s -F document=@"$LOG" \
             "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
-            -F chat_id="${TG_CHAT_ID}" \
-            -F caption="${KERNEL_NAME} build FAILED - run #${GITHUB_RUN_NUMBER}") || true
-          echo "Telegram response: $resp"
+            -F chat_id="$TG_CHAT_ID" \
+            -F caption="${KERNEL_NAME} build FAILED - run #${GITHUB_RUN_NUMBER}" || true
 
       - name: Upload log as GitHub artifact (on failure)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: error-log
-          path: ${{ github.workspace }}/error.log
+          name: error-log-${{ github.run_number }}
+          path: error.log
           if-no-files-found: ignore
-          retention-days: 7
