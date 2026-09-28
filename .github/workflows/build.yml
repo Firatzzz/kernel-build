@@ -38,7 +38,7 @@ env:
   CLANG_URL: https://github.com/ZyCromerZ/Clang/releases/download/17.0.0-20230725-release/Clang-17.0.0-20230725.tar.gz
   GCC64_REPO: https://github.com/ZyCromerZ/aarch64-linux-android-4.9
   GCC32_REPO: https://github.com/ZyCromerZ/arm-linux-androideabi-4.9
-  DEFCONFIG: vendor/fog-perf_defconfig
+  DEFCONFIG: vendor/bengal-perf_defconfig
   KERNEL_NAME: Shisouka-Kernel
   DEVICE: fog
   MODEL: Redmi 10C
