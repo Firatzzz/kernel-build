@@ -282,6 +282,10 @@ if [ "$PTTG" = 1 ]; then
 fi
 
 make O=out $DEFCONFIG
+
+# Disable 32-bit compat vDSO (fails to build with clang: __NR_compat_* undeclared)
+scripts/config --file out/.config -d COMPAT_VDSO
+make O=out olddefconfig
 if [ $DEF_REG = 1 ]; then
 
 		cp .config arch/arm64/configs/$DEFCONFIG
