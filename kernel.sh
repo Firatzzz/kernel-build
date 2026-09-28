@@ -1,15 +1,15 @@
 #!/bin/bash
 # shellcheck disable=SC2154
 #
-# Build Shisouka Kernel - Redmi 10C (fog / SM6225)
+# Build Shisouka Kernel - Redmi 10C (fog / SM6225) + NadekoSU
 # Dijalankan dari GitHub Actions:  bash kernel.sh
 #
-# Variabel yang bisa di-override lewat environment (dari workflow):
+# Variabel environment (dari workflow):
 #   KERNEL_BRANCH  : branch source kernel (kosong = default branch)
 #   DEFCONFIG      : defconfig relatif terhadap arch/arm64/configs
-#   KSU            : 1 = aktifkan KernelSU | 0 = matikan
-#   TG_BOT_TOKEN   : token bot Telegram (sebaiknya dari GitHub Secrets)
-#   TG_CHAT_ID     : chat id grup Telegram
+#   KSU            : 1 = aktifkan NadekoSU | 0 = matikan
+#   TG_BOT_TOKEN   : token bot Telegram (WAJIB dari GitHub Secrets)
+#   TG_CHAT_ID     : chat id grup Telegram (dari GitHub Secrets)
 
 set -eo pipefail
 
@@ -29,28 +29,25 @@ ANYKERNEL_REPO="https://github.com/Kentanglu/AnyKernel3-680"
 CLANG_URL="https://github.com/ZyCromerZ/Clang/releases/download/17.0.0-20230725-release/Clang-17.0.0-20230725.tar.gz"
 GCC64_REPO="https://github.com/ZyCromerZ/aarch64-linux-android-4.9"
 GCC32_REPO="https://github.com/ZyCromerZ/arm-linux-androideabi-4.9"
+NADEKO_SETUP_URL="https://raw.githubusercontent.com/dre698/NadekoSU/main/kernel/setup.sh"
 
-# Nama kernel (dipakai untuk nama zip & LOCALVERSION)
 KERNEL_NAME="Shisouka-Kernel"
 AUTHOR="Firatz"
 MODEL="Redmi 10C"
 DEVICE="fog"
 
-# Redmi 10C (SM6225) memakai bengal. fog-perf_defconfig tidak ada di source.
 DEFCONFIG="${DEFCONFIG:-vendor/bengal-perf_defconfig}"
 
-# KernelSU. 1 = YES | 0 = NO
+# NadekoSU. 1 = YES | 0 = NO
 KSU="${KSU:-1}"
 
 # Push ke Telegram. 1 = YES | 0 = NO
 PTTG=1
-CHATID="${TG_CHAT_ID:-"-1004403448296"}"
-# Disarankan: simpan token di GitHub Secrets (TG_BOT_TOKEN), lalu hapus nilai cadangan ini.
-TOKEN="${TG_BOT_TOKEN:-8201939373:AAHYv-Yrl_TpqkBKr_HaAXAmSJVRzJfl08E}"
+CHATID="${TG_CHAT_ID:-}"
+TOKEN="${TG_BOT_TOKEN:-}"
 
 export TZ="Asia/Jakarta"
 
-# Semua output (stdout + stderr) juga disimpan ke error.log
 : > "$LOG"
 exec > >(tee -a "$LOG") 2>&1
 
@@ -61,16 +58,19 @@ TG_ENABLED=0
 
 esc() { sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
 
-# Memanggil API Telegram. Error ditampilkan (bukan disembunyikan).
+# Panggil API Telegram. Retry 3x, error ditampilkan.
 tg_api()
 {
 	local method="$1"; shift
-	local out
-	out="$(curl -sS --max-time 180 "https://api.telegram.org/bot${TOKEN}/${method}" "$@" 2>&1)" || true
-	if echo "$out" | grep -q '"ok":true'; then
-		return 0
-	fi
-	echo "[!] Telegram ${method} GAGAL: $(echo "$out" | head -c 400)"
+	local out try
+	for try in 1 2 3; do
+		out="$(curl -sS --max-time 600 "https://api.telegram.org/bot${TOKEN}/${method}" "$@" 2>&1)" || true
+		if echo "$out" | grep -q '"ok":true'; then
+			return 0
+		fi
+		echo "[!] Telegram ${method} gagal (percobaan $try): $(echo "$out" | head -c 400)"
+		sleep 3
+	done
 	return 1
 }
 
@@ -78,46 +78,50 @@ tg_msg()
 {
 	[ "$TG_ENABLED" = 1 ] || return 0
 	tg_api sendMessage \
-		-d chat_id="$CHATID" -d parse_mode=HTML -d disable_web_page_preview=true \
-		--data-urlencode text="$1"
+		--form-string chat_id="$CHATID" \
+		--form-string parse_mode=HTML \
+		--form-string disable_web_page_preview=true \
+		--form-string text="$1"
 }
 
+# PENTING: caption pakai --form-string. Dengan -F, nilai yang diawali
+# '<' atau '@' dianggap nama file oleh curl (caption "<b>..." bikin upload gagal).
 tg_doc()
 {
 	[ "$TG_ENABLED" = 1 ] || return 0
 	tg_api sendDocument \
-		-F chat_id="$CHATID" -F parse_mode=HTML \
-		-F document=@"$1" -F caption="$2"
+		--form-string chat_id="$CHATID" \
+		--form-string parse_mode=HTML \
+		--form-string caption="$2" \
+		-F document=@"$1"
 }
 
-# Validasi token & akses grup sebelum build dimulai
 tg_init()
 {
 	if [ "$PTTG" != 1 ]; then return 0; fi
-	if [ -z "$TOKEN" ]; then
-		echo "[!] TOKEN kosong. Notifikasi Telegram dilewati."
+	if [ -z "$TOKEN" ] || [ -z "$CHATID" ]; then
+		echo "[!] TG_BOT_TOKEN / TG_CHAT_ID kosong. Set di GitHub Secrets. Telegram dilewati."
 		return 0
 	fi
 
 	local r
 	r="$(curl -sS --max-time 30 "https://api.telegram.org/bot${TOKEN}/getMe" 2>&1 || true)"
 	if ! echo "$r" | grep -q '"ok":true'; then
-		echo "[!] Token ditolak Telegram (kemungkinan sudah dicabut/salah): $(echo "$r" | head -c 300)"
+		echo "[!] Token ditolak Telegram (dicabut/salah): $(echo "$r" | head -c 300)"
 		return 0
 	fi
 	echo "[+] Bot OK: $(echo "$r" | grep -o '"username":"[^"]*"' || true)"
 
-	r="$(curl -sS --max-time 30 "https://api.telegram.org/bot${TOKEN}/getChat" -d chat_id="$CHATID" 2>&1 || true)"
+	r="$(curl -sS --max-time 30 "https://api.telegram.org/bot${TOKEN}/getChat" --form-string chat_id="$CHATID" 2>&1 || true)"
 	if ! echo "$r" | grep -q '"ok":true'; then
 		echo "[!] Chat ID $CHATID tidak bisa diakses bot: $(echo "$r" | head -c 300)"
-		echo "[!] Pastikan bot sudah masuk grup dan ID grup benar."
+		echo "[!] Pastikan bot sudah masuk grup (dan jadi admin bila perlu) dan ID benar."
 		return 0
 	fi
 	echo "[+] Grup OK: $(echo "$r" | grep -o '"title":"[^"]*"' || true)"
 	TG_ENABLED=1
 }
 
-# Dipanggil otomatis saat script keluar; kalau gagal, kirim log ke Telegram
 on_exit()
 {
 	local code=$?
@@ -175,7 +179,6 @@ validate_defconfig()
 		done
 		if [ -z "$found" ]; then
 			echo "[×] Tidak ada defconfig yang cocok di branch '$BRANCH_NAME'."
-			echo "Isi $cfg_dir/vendor:"
 			ls "$cfg_dir/vendor" 2>/dev/null | head -n 50 || true
 			exit 1
 		fi
@@ -195,7 +198,6 @@ setup_toolchain()
 	tar -xf "$WORKDIR/clang.tar.gz" -C "$TC/clang"
 	rm -f "$WORKDIR/clang.tar.gz"
 
-	# Tarball bisa flat / punya folder induk; bin/clang biasanya symlink
 	local clang_bin
 	clang_bin="$(find "$TC/clang" \( -type f -o -type l \) -name clang -path '*/bin/*' 2>/dev/null | head -n1 || true)"
 	if [ -z "$clang_bin" ]; then
@@ -216,22 +218,77 @@ setup_toolchain()
 	git clone --depth=1 "$ANYKERNEL_REPO" "$AK3"
 }
 
+# Buang KernelSU bawaan source (biar tidak bentrok), pasang NadekoSU segar.
 prepare_ksu()
 {
 	cd "$KERNEL"
 	KSU_TEXT="Off"
-	# Source sudah berisi integrasi KernelSU dan vendor/ksu.config,
-	# jadi setup.sh tiann/NadekoSU TIDAK dijalankan (akan bentrok).
-	if [ "$KSU" = "1" ]; then
-		if [ -d KernelSU ] || [ -d drivers/kernelsu ]; then
-			KSU_TEXT="On"
-		else
-			echo "[!] Folder KernelSU tidak ditemukan di source, build tanpa KernelSU."
-			KSU_TEXT="Off (source tanpa KernelSU)"
-			KSU=0
-		fi
+	KSU_HOOK="none"
+	KERNELSU_VERSION="-"
+
+	if [ "$KSU" != "1" ]; then
+		echo "[*] KernelSU dimatikan (KSU=$KSU)"
+		return 0
 	fi
+
+	echo "[*] Bersihkan KernelSU bawaan source"
+	rm -rf KernelSU drivers/kernelsu drivers/KernelSU
+	# hapus sisa referensi lama; setup.sh NadekoSU akan menambahkan yang baru
+	sed -i '/kernelsu/Id' drivers/Makefile drivers/Kconfig
+
+	echo "[*] Setup NadekoSU"
+	curl -LSs "$NADEKO_SETUP_URL" | bash -
+
+	if [ ! -f KernelSU/kernel/Kconfig ]; then
+		echo "[×] Setup NadekoSU gagal: KernelSU/kernel/Kconfig tidak ada."
+		exit 1
+	fi
+	if ! grep -qi kernelsu drivers/Makefile || ! grep -qi kernelsu drivers/Kconfig; then
+		echo "[×] drivers/Makefile atau drivers/Kconfig belum memuat kernelsu."
+		exit 1
+	fi
+
+	local cnt
+	cnt="$(cd KernelSU && git rev-list --count HEAD 2>/dev/null || echo 0)"
+	KERNELSU_VERSION=$((33300 + cnt))
+
+	# Pilih metode hook sesuai dukungan versi NadekoSU
+	if grep -q "KSU_MANUAL_HOOK" KernelSU/kernel/Kconfig; then
+		KSU_HOOK="manual"
+	else
+		KSU_HOOK="branchlink"
+	fi
+	KSU_TEXT="On (NadekoSU ${KERNELSU_VERSION}, hook: ${KSU_HOOK})"
 	echo "[+] KernelSU: $KSU_TEXT"
+}
+
+# Patch hook manual (hanya bila NadekoSU memakai KSU_MANUAL_HOOK)
+apply_ksu_patch()
+{
+	[ "$KSU" = "1" ] && [ "$KSU_HOOK" = "manual" ] || return 0
+	cd "$KERNEL"
+
+	local p="$WORKDIR/patchs/KernelSU.patch"
+	if [ ! -f "$p" ]; then
+		echo "[×] $p tidak ditemukan. Mode manual hook butuh patchs/KernelSU.patch di repo workflow."
+		exit 1
+	fi
+
+	if patch -p1 --dry-run < "$p" >/dev/null 2>&1; then
+		patch -p1 < "$p"
+		echo "[+] KernelSU.patch diterapkan"
+	elif patch -p1 -R --dry-run < "$p" >/dev/null 2>&1; then
+		echo "[+] KernelSU.patch sudah ada di source, dilewati"
+	else
+		echo "[×] KernelSU.patch tidak cocok dengan source ini (reject)."
+		exit 1
+	fi
+
+	# ekspor simbol static yang dibutuhkan KernelSU
+	sed -i 's/^static const struct file_operations sel_handle_status_ops/const struct file_operations sel_handle_status_ops/' security/selinux/selinuxfs.c
+	sed -i 's/^static ssize_t (\*const write_op\[\])/ssize_t (*const write_op[])/' security/selinux/selinuxfs.c
+	sed -i 's/^static void security_dump_masked_av(/void security_dump_masked_av(/' security/selinux/ss/services.c
+	sed -i 's/^static void context_struct_compute_av(/void context_struct_compute_av(/' security/selinux/ss/services.c
 }
 
 notify_start()
@@ -258,7 +315,6 @@ build_kernel()
 	export KBUILD_BUILD_HOST="github-actions"
 	export LOCALVERSION="-${KERNEL_NAME}"
 
-	# Mengikuti build.sh upstream source ini (LLVM=1 LLVM_IAS=1)
 	local ARGS=(
 		O=out ARCH=arm64
 		LLVM=1 LLVM_IAS=1
@@ -274,29 +330,48 @@ build_kernel()
 	rm -rf out
 	make "${ARGS[@]}" "$DEFCONFIG"
 
-	# Gabungkan fragment: konfigurasi khusus fog + KernelSU (bila ada)
+	# Fragment: fog.config; ksu.config HANYA untuk mode branchlink
 	local FRAGS=()
 	[ -f arch/arm64/configs/vendor/xiaomi/fog.config ] && FRAGS+=(arch/arm64/configs/vendor/xiaomi/fog.config)
-	if [ "$KSU" = "1" ] && [ -f arch/arm64/configs/vendor/ksu.config ]; then
+	if [ "$KSU" = "1" ] && [ "$KSU_HOOK" = "branchlink" ] && [ -f arch/arm64/configs/vendor/ksu.config ]; then
 		FRAGS+=(arch/arm64/configs/vendor/ksu.config)
 	fi
 	if [ "${#FRAGS[@]}" -gt 0 ]; then
 		echo "[*] Merge fragment: ${FRAGS[*]}"
 		scripts/kconfig/merge_config.sh -m -O out out/.config "${FRAGS[@]}"
-		make "${ARGS[@]}" olddefconfig
 	fi
 
-	# Verifikasi KernelSU benar-benar aktif di config akhir
+	# Wajib untuk mount modul KernelSU
+	scripts/config --file out/.config -e OVERLAY_FS
+
+	# vDSO 32-bit gagal dengan clang
+	scripts/config --file out/.config -d COMPAT_VDSO
+
+	if [ "$KSU" = "1" ]; then
+		if [ "$KSU_HOOK" = "manual" ]; then
+			scripts/config --file out/.config \
+				-e KSU -e KSU_MANUAL_HOOK \
+				-e KSU_MANUAL_HOOK_AUTO_INPUT_HOOK \
+				-e KSU_MANUAL_HOOK_AUTO_SETUID_HOOK \
+				-e KSU_MANUAL_HOOK_AUTO_INITRC_HOOK \
+				-d KSU_HACK_ARM64_BRANCH_LINK
+		else
+			scripts/config --file out/.config -e KSU
+		fi
+	fi
+	make "${ARGS[@]}" olddefconfig
+
+	# Patch hook manual dilakukan setelah config siap
+	apply_ksu_patch
+
 	if [ "$KSU" = "1" ]; then
 		echo "--- CONFIG KernelSU di out/.config ---"
-		grep -E '^CONFIG_KSU' out/.config || true
-		if grep -Eq '^CONFIG_KSU=y' out/.config; then
-			echo "[+] KernelSU AKTIF (CONFIG_KSU=y)"
-		else
-			echo "[!] CONFIG_KSU=y tidak ditemukan. Build berjalan TANPA KernelSU."
-			KSU_TEXT="Off (CONFIG_KSU tidak aktif)"
-			KSU=0
+		grep -E '^CONFIG_(KSU|OVERLAY_FS)' out/.config || true
+		if ! grep -Eq '^CONFIG_KSU=y' out/.config; then
+			echo "[×] CONFIG_KSU=y tidak aktif setelah olddefconfig. Dihentikan agar tidak menghasilkan kernel tanpa root."
+			exit 1
 		fi
+		echo "[+] KernelSU AKTIF"
 	fi
 
 	echo "[*] Mulai kompilasi"
@@ -323,13 +398,13 @@ gen_zip()
 	local STAMP NAME
 	STAMP="$(date +%Y%m%d-%H%M)"
 	NAME="${KERNEL_NAME}-${DEVICE}"
-	[ "$KSU" = "1" ] && NAME="${NAME}-KSU"
+	[ "$KSU" = "1" ] && NAME="${NAME}-NDKSU"
 	NAME="${NAME}-${STAMP}-${COMMIT_SHORT}.zip"
 
 	echo "[*] Cek device di anykernel.sh"
 	grep -nE 'device\.name|do\.devicecheck' "$AK3/anykernel.sh" || true
 	if ! grep -qiE 'device\.name[0-9]*=(fog|wind|rain)' "$AK3/anykernel.sh"; then
-		echo "[!] anykernel.sh tidak menyebut fog/wind/rain. Zip mungkin ditolak recovery (device check)."
+		echo "[!] anykernel.sh tidak menyebut fog/wind/rain. Zip mungkin ditolak recovery."
 	fi
 
 	cp "$BOOT/Image.gz" "$AK3/Image.gz"
@@ -362,7 +437,6 @@ send_zip()
 		"Commit: <code>${COMMIT_SHORT}</code>" \
 		"MD5: <code>${ZIP_MD5}</code>")"
 
-	# Batas upload Bot API = 50 MB
 	if [ "$size" -gt 50000000 ]; then
 		tg_msg "$(printf '%s\n%s\n%s' \
 			"<b>${KERNEL_NAME}</b> build SUKSES, tetapi zip lebih dari 50MB (tidak bisa dikirim via bot)." \
