@@ -206,7 +206,7 @@ WAKTU=$(date +"%F-%S")
 	fi
 
 	msger -n "|| Cloning Anykernel ||"
-	git clone --depth=1 https://github.com/alternoegraha/AnyKernel3-680 -b master AnyKernel3
+	git clone --depth=1 https://github.com/ahmadsyahputra1222-boop/AnyKernel3-680 -b master AnyKernel3
 
 	if [ $BUILD_DTBO = 1 ]
 	then
