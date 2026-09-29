@@ -17,7 +17,8 @@
 #                   builtin = KernelSU bawaan source (gagal jika tidak ada)
 #                   next    = KernelSU-Next branch legacy (non-GKI)
 #                   sukisu  = SukiSU-Ultra
-#   KSU_HOOK      : kprobes (default) | manual (hook harus SUDAH ada di source)
+#                   nadeko  = NadekoSU (manual hook dipasang otomatis via patch)
+#   KSU_HOOK      : kprobes (default) | manual (hook manual dipakai untuk NadekoSU)
 #   CUSTOM_LOCALVERSION : suffix versi kernel (default kosong, lihat catatan modul)
 #   TG_BOT_TOKEN  : token bot Telegram (disarankan dari GitHub Secrets)
 #   TG_CHAT_ID    : chat id grup Telegram (disarankan dari GitHub Secrets)
@@ -43,6 +44,7 @@ PROTON_REPO="https://github.com/kdrag0n/proton-clang"
 ZYC_CLANG_URL="https://github.com/ZyCromerZ/Clang/releases/download/17.0.0-20230725-release/Clang-17.0.0-20230725.tar.gz"
 ZYC_GCC64_REPO="https://github.com/ZyCromerZ/aarch64-linux-android-4.9"
 ZYC_GCC32_REPO="https://github.com/ZyCromerZ/arm-linux-androideabi-4.9"
+NADEKO_SETUP_URL="https://raw.githubusercontent.com/dre698/NadekoSU/main/kernel/setup.sh"
 
 KERNEL_NAME="Shisouka-Kernel"
 AUTHOR="Firatz"
@@ -355,8 +357,27 @@ prepare_ksu()
 		KSU_TAG="SUKISU"
 		KSU_TEXT="On (SukiSU-Ultra, hook: ${KSU_HOOK})"
 		;;
+	nadeko)
+		clean_ksu
+		echo "[*] Pasang NadekoSU"
+		curl -LSs "$NADEKO_SETUP_URL" | bash -
+		if [ ! -f KernelSU/kernel/Kconfig ]; then
+			echo "[×] Setup NadekoSU gagal: KernelSU/kernel/Kconfig tidak ada."
+			exit 1
+		fi
+		if ! grep -q "KSU_MANUAL_HOOK" KernelSU/kernel/Kconfig; then
+			echo "[×] NadekoSU ini tidak punya KSU_MANUAL_HOOK. Tidak bisa dipakai di kernel ini."
+			exit 1
+		fi
+		local cnt ver
+		cnt="$(cd KernelSU && git rev-list --count HEAD 2>/dev/null || echo 0)"
+		ver=$((33300 + cnt))
+		KSU_HOOK="manual"
+		KSU_TAG="NDKSU"
+		KSU_TEXT="On (NadekoSU ${ver}, hook: ${KSU_HOOK})"
+		;;
 	*)
-		echo "[×] KSU_SOURCE='$KSU_SOURCE' tidak dikenal (auto|builtin|next|sukisu)"
+		echo "[×] KSU_SOURCE='$KSU_SOURCE' tidak dikenal (auto|builtin|next|sukisu|nadeko)"
 		exit 1
 		;;
 	esac
@@ -392,13 +413,65 @@ prepare_ksu()
 	echo "[+] KernelSU: $KSU_TEXT"
 	echo "    Kconfig : $KSU_KCONFIG"
 
-	if [ "$KSU_HOOK" = "manual" ]; then
+	if [ "$KSU_HOOK" = "manual" ] && [ "$mode" != "nadeko" ]; then
 		if ! grep -qs 'ksu_handle_' fs/exec.c fs/open.c; then
 			echo "[×] KSU_HOOK=manual, tetapi hook ksu_handle_* tidak ada di fs/exec.c / fs/open.c."
 			echo "    Hook manual harus sudah ada di source. Pakai KSU_HOOK=kprobes."
 			exit 1
 		fi
 	fi
+}
+
+apply_nadeko_patch()
+{
+	[ "$KSU" = "1" ] && [ "${KSU_MODE:-none}" = "nadeko" ] || return 0
+	cd "$KERNEL"
+
+	local patch_file="$WORKDIR/patchs/KernelSU.patch"
+	if [ ! -f "$patch_file" ]; then
+		echo "[×] Patch NadekoSU tidak ditemukan: $patch_file"
+		exit 1
+	fi
+
+	if grep -q 'ksu_handle_execveat' fs/exec.c \
+		&& grep -q 'ksu_handle_faccessat' fs/open.c \
+		&& grep -q 'ksu_handle_stat' fs/stat.c \
+		&& grep -q 'ksu_handle_sys_reboot' kernel/reboot.c; then
+		echo "[=] Hook manual NadekoSU sudah ada, lewati patch."
+	else
+		echo "[*] Pasang patch hook manual NadekoSU"
+		patch -p1 < "$patch_file" || { echo "[×] Gagal memasang patch hook NadekoSU."; exit 1; }
+	fi
+
+	local miss=0 pair f h
+	for pair in \
+		"fs/exec.c:ksu_handle_execveat" \
+		"fs/open.c:ksu_handle_faccessat" \
+		"fs/stat.c:ksu_handle_stat" \
+		"fs/stat.c:ksu_handle_newfstat_ret" \
+		"fs/stat.c:ksu_handle_fstat64_ret" \
+		"kernel/reboot.c:ksu_handle_sys_reboot"; do
+		f="${pair%%:*}"; h="${pair##*:}"
+		if grep -q "$h" "$f"; then echo "[+] hook $h ada di $f"; else echo "[×] hook $h HILANG di $f"; miss=1; fi
+	done
+	[ "$miss" = 0 ] || exit 1
+
+	echo "[*] Ekspor simbol static SELinux untuk NadekoSU"
+	if grep -q '^static const struct file_operations sel_handle_status_ops' security/selinux/selinuxfs.c; then
+		sed -i 's/^static const struct file_operations sel_handle_status_ops/const struct file_operations sel_handle_status_ops/' security/selinux/selinuxfs.c
+	fi
+	if grep -q '^static ssize_t (\*const write_op\[\])' security/selinux/selinuxfs.c; then
+		sed -i 's/^static ssize_t (\*const write_op\[\])/ssize_t (*const write_op[])/' security/selinux/selinuxfs.c
+	fi
+	if ! grep -q '^const struct file_operations sel_handle_status_ops' security/selinux/selinuxfs.c; then
+		echo "[×] sel_handle_status_ops gagal diekspor di security/selinux/selinuxfs.c"
+		exit 1
+	fi
+	if ! grep -q '^ssize_t (\*const write_op\[\])' security/selinux/selinuxfs.c; then
+		echo "[×] write_op gagal diekspor di security/selinux/selinuxfs.c"
+		exit 1
+	fi
+	echo "[+] Hook manual dan ekspor SELinux NadekoSU siap"
 }
 
 notify_start()
@@ -635,6 +708,7 @@ clone_kernel
 validate_defconfig
 setup_toolchain
 prepare_ksu
+apply_nadeko_patch
 notify_start
 build_kernel
 gen_zip
