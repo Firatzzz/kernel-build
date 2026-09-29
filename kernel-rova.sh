@@ -364,11 +364,27 @@ prepare_ksu()
 
 	find_ksu_kconfig
 	if [ -z "$KSU_KCONFIG" ]; then
+		if [ "$KSU_SOURCE" = "auto" ]; then
+			echo "[!] Setelah setup, Kconfig 'config KSU' tidak ditemukan. Root otomatis dimatikan agar build tetap jalan."
+			KSU=0
+			KSU_MODE="none"
+			KSU_TAG=""
+			KSU_TEXT="Off (auto-fallback: KernelSU setup gagal)"
+			return 0
+		fi
 		echo "[×] Setelah setup, Kconfig 'config KSU' tidak ditemukan. Integrasi gagal."
 		exit 1
 	fi
 	if [ "$mode" != "builtin" ]; then
 		if ! grep -qi kernelsu drivers/Makefile || ! grep -qi kernelsu drivers/Kconfig; then
+			if [ "$KSU_SOURCE" = "auto" ]; then
+				echo "[!] drivers/Makefile atau drivers/Kconfig belum memuat kernelsu. Root otomatis dimatikan agar build tetap jalan."
+				KSU=0
+				KSU_MODE="none"
+				KSU_TAG=""
+				KSU_TEXT="Off (auto-fallback: KernelSU setup gagal)"
+				return 0
+			fi
 			echo "[×] drivers/Makefile atau drivers/Kconfig belum memuat kernelsu."
 			exit 1
 		fi
