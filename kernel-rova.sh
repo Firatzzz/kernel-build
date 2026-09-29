@@ -1,19 +1,26 @@
 #!/bin/bash
 # shellcheck disable=SC2154
 #
-# Build Shisouka Kernel - Redmi 10C (fog / SM6225)
-# Source : https://github.com/Firatzzz/kernel_xiaomi_sm6225 (branch ye)
+# Build Shisouka Kernel - Redmi 4A / 5A (rova = rolex + riva, MSM8917)
+# Source : https://github.com/Firatzzz/kernel_rova (branch 16-dev, Linux 4.19.325)
 # Dijalankan dari GitHub Actions:  bash kernel.sh
 #
-# Variabel environment (dari workflow):
-#   KERNEL_BRANCH : branch source kernel (default: ye)
-#   DEFCONFIG     : defconfig relatif terhadap arch/arm64/configs
-#   FOG_CFG       : fragment config tambahan (opsional)
-#   KSU           : 1 = aktifkan KernelSU | 0 = matikan
-#   KSU_SOURCE    : nadeko  = NadekoSU + hook manual, dipasang otomatis (default)
-#                   builtin = KernelSU bawaan source ye (hook syscall table)
-#   TG_BOT_TOKEN  : token bot Telegram (WAJIB dari GitHub Secrets)
-#   TG_CHAT_ID    : chat id grup Telegram (dari GitHub Secrets)
+# Variabel environment (semua opsional, dari workflow):
+#   KERNEL_BRANCH : branch source kernel (default: 16-dev)
+#   DEFCONFIG     : defconfig relatif terhadap arch/arm64/configs (default: deteksi otomatis)
+#   FRAGMENTS     : fragment config tambahan, dipisah spasi (opsional)
+#   TOOLCHAIN     : proton (default, Clang 13 + binutils GNU) | zyc (Clang 17 + GCC 4.9)
+#   LLVM_IAS      : 1 (default) | 0 kalau ada error assembler
+#   ENABLE_LTO    : 0 (default, LTO/CFI dimatikan agar build stabil) | 1
+#   KSU           : 1 = aktifkan root KernelSU | 0 = matikan (default: 1)
+#   KSU_SOURCE    : auto    = pakai KernelSU bawaan source jika ada, kalau tidak pakai next (default)
+#                   builtin = KernelSU bawaan source (gagal jika tidak ada)
+#                   next    = KernelSU-Next branch legacy (non-GKI)
+#                   sukisu  = SukiSU-Ultra
+#   KSU_HOOK      : kprobes (default) | manual (hook harus SUDAH ada di source)
+#   CUSTOM_LOCALVERSION : suffix versi kernel (default kosong, lihat catatan modul)
+#   TG_BOT_TOKEN  : token bot Telegram (disarankan dari GitHub Secrets)
+#   TG_CHAT_ID    : chat id grup Telegram (disarankan dari GitHub Secrets)
 
 set -eo pipefail
 
@@ -27,27 +34,30 @@ AK3="$WORKDIR/AnyKernel3"
 OUTDIR="$WORKDIR/output"
 LOG="$WORKDIR/error.log"
 
-KERNEL_REPO="https://github.com/Firatzzz/kernel_xiaomi_sm6225"
-KERNEL_BRANCH="${KERNEL_BRANCH:-ye}"
-ANYKERNEL_REPO="https://github.com/Kentanglu/AnyKernel3-680"
-CLANG_URL="https://github.com/ZyCromerZ/Clang/releases/download/17.0.0-20230725-release/Clang-17.0.0-20230725.tar.gz"
-GCC64_REPO="https://github.com/ZyCromerZ/aarch64-linux-android-4.9"
-GCC32_REPO="https://github.com/ZyCromerZ/arm-linux-androideabi-4.9"
-NADEKO_SETUP_URL="https://raw.githubusercontent.com/dre698/NadekoSU/main/kernel/setup.sh"
+KERNEL_REPO="https://github.com/Firatzzz/kernel_rova"
+KERNEL_BRANCH="${KERNEL_BRANCH:-16-dev}"
+ANYKERNEL_REPO="https://github.com/osm0sis/AnyKernel3"
+
+TOOLCHAIN="${TOOLCHAIN:-proton}"
+PROTON_REPO="https://github.com/kdrag0n/proton-clang"
+ZYC_CLANG_URL="https://github.com/ZyCromerZ/Clang/releases/download/17.0.0-20230725-release/Clang-17.0.0-20230725.tar.gz"
+ZYC_GCC64_REPO="https://github.com/ZyCromerZ/aarch64-linux-android-4.9"
+ZYC_GCC32_REPO="https://github.com/ZyCromerZ/arm-linux-androideabi-4.9"
 
 KERNEL_NAME="Shisouka-Kernel"
 AUTHOR="Firatz"
-MODEL="Redmi 10C"
-DEVICE="fog"
+MODEL="Redmi 4A / 5A"
+DEVICE="rova"
 
-# Branch ye punya vendor/fog-perf_defconfig dan vendor/fog_ksu.config
-DEFCONFIG="${DEFCONFIG:-vendor/fog-perf_defconfig}"
-FOG_CFG="${FOG_CFG:-}"
+DEFCONFIG="${DEFCONFIG:-}"
+FRAGMENTS="${FRAGMENTS:-}"
+LLVM_IAS="${LLVM_IAS:-1}"
+ENABLE_LTO="${ENABLE_LTO:-0}"
 
-# KernelSU. 1 = YES | 0 = NO
+# Root. 1 = YES | 0 = NO
 KSU="${KSU:-1}"
-# nadeko = NadekoSU + hook manual | builtin = KernelSU bawaan source (syscall table)
-KSU_SOURCE="${KSU_SOURCE:-nadeko}"
+KSU_SOURCE="${KSU_SOURCE:-auto}"
+KSU_HOOK="${KSU_HOOK:-kprobes}"
 
 # Push ke Telegram. 1 = YES | 0 = NO
 PTTG=1
@@ -108,7 +118,7 @@ tg_init()
 {
 	if [ "$PTTG" != 1 ]; then return 0; fi
 	if [ -z "$TOKEN" ] || [ -z "$CHATID" ]; then
-		echo "[!] TG_BOT_TOKEN / TG_CHAT_ID kosong. Set di GitHub Secrets. Telegram dilewati."
+		echo "[!] TG_BOT_TOKEN / TG_CHAT_ID kosong. Telegram dilewati."
 		return 0
 	fi
 
@@ -157,6 +167,26 @@ trap on_exit EXIT
 ##------------------------------------------------------##
 ##----------------------- Langkah ----------------------##
 
+ensure_deps()
+{
+	local miss=() t SUDO=""
+	for t in git curl wget zip python3 bc flex bison make; do
+		command -v "$t" >/dev/null 2>&1 || miss+=("$t")
+	done
+	if [ "${#miss[@]}" -gt 0 ]; then
+		echo "[!] Tool belum ada: ${miss[*]}"
+		if command -v apt-get >/dev/null 2>&1; then
+			command -v sudo >/dev/null 2>&1 && SUDO="sudo"
+			$SUDO apt-get update -qq
+			$SUDO apt-get install -y -qq git curl wget zip python3 bc flex bison make \
+				libssl-dev libelf-dev cpio xz-utils lz4 ccache
+		else
+			echo "[×] Install manual: ${miss[*]}"
+			exit 1
+		fi
+	fi
+}
+
 clone_kernel()
 {
 	echo "[*] Clone kernel source: $KERNEL_REPO (branch: $KERNEL_BRANCH)"
@@ -174,293 +204,185 @@ clone_kernel()
 	echo "Kernel  : $KERVER"
 }
 
+# Cari defconfig rova otomatis kalau DEFCONFIG tidak diisi / tidak ada.
 validate_defconfig()
 {
 	cd "$KERNEL"
-	local cfg_dir="arch/arm64/configs"
-	echo "[*] Defconfig diminta: $DEFCONFIG"
+	local cfg_dir="arch/arm64/configs" cand found=""
+	echo "[*] Defconfig tersedia yang berhubungan dengan rova/msm8917/msm8937:"
+	(cd "$cfg_dir" && find . -type f -name '*defconfig*' | sed 's|^\./||' \
+		| grep -iE 'rova|rolex|riva|8917|8937|mi8937' | sort | head -n 40) || true
 
-	if [ ! -f "$cfg_dir/$DEFCONFIG" ]; then
-		echo "[!] $DEFCONFIG tidak ada, mencari pengganti otomatis..."
-		local found="" cand
-		for cand in vendor/fog-perf_defconfig vendor/bengal-perf_defconfig vendor/bengal_defconfig; do
+	if [ -n "$DEFCONFIG" ] && [ -f "$cfg_dir/$DEFCONFIG" ]; then
+		found="$DEFCONFIG"
+	else
+		[ -z "$DEFCONFIG" ] || echo "[!] DEFCONFIG='$DEFCONFIG' tidak ada, mencari otomatis..."
+		for cand in rova_defconfig rova-perf_defconfig vendor/rova_defconfig \
+			rolex_defconfig riva_defconfig msm8917-perf_defconfig msm8917_defconfig; do
 			if [ -f "$cfg_dir/$cand" ]; then found="$cand"; break; fi
 		done
 		if [ -z "$found" ]; then
-			echo "[×] Tidak ada defconfig yang cocok di branch '$BRANCH_NAME'."
-			ls "$cfg_dir/vendor" 2>/dev/null | head -n 50 || true
-			exit 1
+			found="$(cd "$cfg_dir" && find . -type f -name '*_defconfig' | sed 's|^\./||' \
+				| grep -iE 'rova|rolex|riva|8917' | grep -viE 'debug|diag' | sort | head -n1 || true)"
 		fi
-		DEFCONFIG="$found"
 	fi
-	# bengal-perf TIDAK punya CONFIG_BUILD_ARM64_DT_OVERLAY, sehingga target
-	# dtb.img/dtbo.img tidak ada ("No rule to make target 'dtb.img'").
-	# Workflow sering masih mengirim DEFCONFIG=bengal-perf, jadi paksa ke fog-perf.
-	case "$DEFCONFIG" in
-		vendor/bengal-perf_defconfig|vendor/bengal_defconfig)
-			if [ -f "$cfg_dir/vendor/fog-perf_defconfig" ]; then
-				echo "[!] $DEFCONFIG diganti ke vendor/fog-perf_defconfig (butuh dtb.img/dtbo.img)"
-				DEFCONFIG="vendor/fog-perf_defconfig"
-			fi
-			;;
-	esac
+
+	if [ -z "$found" ]; then
+		echo "[×] Tidak ada defconfig rova yang cocok di branch '$BRANCH_NAME'."
+		echo "    Isi arch/arm64/configs:"
+		ls "$cfg_dir" | head -n 80 || true
+		echo "    Set DEFCONFIG=<nama>_defconfig lewat workflow."
+		exit 1
+	fi
+	DEFCONFIG="$found"
 	echo "[+] Defconfig dipakai: $DEFCONFIG"
 
-	# Fragment KernelSU bawaan source ye hanya untuk mode builtin
-	if [ "$KSU" = "1" ] && [ "$KSU_SOURCE" = "builtin" ] && [ -z "$FOG_CFG" ] \
-		&& [ -f "$cfg_dir/vendor/fog_ksu.config" ]; then
-		FOG_CFG="vendor/fog_ksu.config"
-	fi
-	if [ -n "$FOG_CFG" ] && [ -f "$cfg_dir/$FOG_CFG" ]; then
-		echo "[+] Fragment dipakai: $FOG_CFG"
-	else
-		[ -z "$FOG_CFG" ] || echo "[!] Fragment $FOG_CFG tidak ada, dilewati"
-		FOG_CFG=""
-		echo "[*] Tanpa fragment tambahan, hanya $DEFCONFIG"
-	fi
+	local f
+	for f in $FRAGMENTS; do
+		if [ ! -f "$cfg_dir/$f" ]; then
+			echo "[×] Fragment $f tidak ada di $cfg_dir"
+			exit 1
+		fi
+		echo "[+] Fragment: $f"
+	done
 }
 
 setup_toolchain()
 {
-	echo "[*] Download Clang"
-	mkdir -p "$TC/clang"
-	wget -q "$CLANG_URL" -O "$WORKDIR/clang.tar.gz"
-	tar -xf "$WORKDIR/clang.tar.gz" -C "$TC/clang"
-	rm -f "$WORKDIR/clang.tar.gz"
-
-	local clang_bin
-	clang_bin="$(find "$TC/clang" \( -type f -o -type l \) -name clang -path '*/bin/*' 2>/dev/null | head -n1 || true)"
-	if [ -z "$clang_bin" ]; then
-		echo "[×] clang tidak ditemukan. Isi hasil ekstrak:"
-		find "$TC/clang" -maxdepth 3 | head -n 60 || true
+	mkdir -p "$TC"
+	case "$TOOLCHAIN" in
+	proton)
+		echo "[*] Clone Proton Clang (Clang + binutils GNU lengkap)"
+		git clone --depth=1 "$PROTON_REPO" "$TC/clang"
+		CLANG_DIR="$TC/clang"
+		TC_PATH="$CLANG_DIR/bin"
+		CROSS64="aarch64-linux-gnu-"
+		CROSS32="arm-linux-gnueabi-"
+		CLANG_TRIPLE_V="aarch64-linux-gnu-"
+		;;
+	zyc)
+		echo "[*] Download ZyC Clang 17 + GCC 4.9"
+		mkdir -p "$TC/clang"
+		wget -q "$ZYC_CLANG_URL" -O "$WORKDIR/clang.tar.gz"
+		tar -xf "$WORKDIR/clang.tar.gz" -C "$TC/clang"
+		rm -f "$WORKDIR/clang.tar.gz"
+		local cb
+		cb="$(find "$TC/clang" \( -type f -o -type l \) -name clang -path '*/bin/*' 2>/dev/null | head -n1 || true)"
+		if [ -z "$cb" ]; then
+			echo "[×] clang tidak ditemukan setelah ekstrak"
+			exit 1
+		fi
+		CLANG_DIR="$(dirname "$(dirname "$cb")")"
+		git clone --depth=1 "$ZYC_GCC64_REPO" "$TC/gcc64"
+		git clone --depth=1 "$ZYC_GCC32_REPO" "$TC/gcc32"
+		TC_PATH="$CLANG_DIR/bin:$TC/gcc64/bin:$TC/gcc32/bin"
+		CROSS64="aarch64-linux-android-"
+		CROSS32="arm-linux-androideabi-"
+		CLANG_TRIPLE_V="aarch64-linux-gnu-"
+		;;
+	*)
+		echo "[×] TOOLCHAIN='$TOOLCHAIN' tidak dikenal (proton|zyc)"
 		exit 1
-	fi
-	CLANG_DIR="$(dirname "$(dirname "$clang_bin")")"
-	"$clang_bin" --version | head -n1 || true
-	ls "$CLANG_DIR/bin" | grep -E '^(ld\.lld|llvm-ar|llvm-nm|llvm-objdump|llvm-strip)$' \
-		|| echo "[!] sebagian tool llvm tidak ada"
+		;;
+	esac
 
-	echo "[*] Clone GCC 4.9 (aarch64 & arm32)"
-	git clone --depth=1 "$GCC64_REPO" "$TC/gcc64"
-	git clone --depth=1 "$GCC32_REPO" "$TC/gcc32"
+	export PATH="$TC_PATH:$PATH"
+	CLANG_VER="$(clang --version | head -n1 || true)"
+	echo "[+] $CLANG_VER"
+	local t
+	for t in ld.lld llvm-ar llvm-nm llvm-objcopy llvm-objdump llvm-strip; do
+		command -v "$t" >/dev/null 2>&1 || { echo "[×] $t tidak ada di toolchain"; exit 1; }
+	done
 
-	echo "[*] Clone AnyKernel3"
+	echo "[*] Clone AnyKernel3 (osm0sis)"
 	git clone --depth=1 "$ANYKERNEL_REPO" "$AK3"
 }
 
-# builtin : pakai KernelSU yang sudah ada di source ye (tanpa patch, tanpa download)
-# nadeko  : buang KernelSU bawaan, pasang NadekoSU segar (butuh hook manual)
+find_ksu_kconfig()
+{
+	KSU_KCONFIG="$(grep -rlE '^config KSU$' --include='Kconfig*' \
+		KernelSU drivers fs kernel security 2>/dev/null | head -n1 || true)"
+}
+
+# Hapus KernelSU lama bawaan source sebelum memasang yang baru
+clean_ksu()
+{
+	echo "[*] Bersihkan KernelSU lama"
+	rm -rf KernelSU drivers/kernelsu drivers/KernelSU
+	[ ! -f drivers/Makefile ] || sed -i '/kernelsu/Id' drivers/Makefile
+	[ ! -f drivers/Kconfig ] || sed -i '/kernelsu/Id' drivers/Kconfig
+}
+
 prepare_ksu()
 {
 	cd "$KERNEL"
 	KSU_TEXT="Off"
-	KSU_HOOK="none"
+	KSU_TAG=""
+	KSU_MODE="none"
 
 	if [ "$KSU" != "1" ]; then
-		echo "[*] KernelSU dimatikan (KSU=$KSU)"
+		echo "[*] Root dimatikan (KSU=$KSU)"
 		return 0
 	fi
 
-	if [ "$KSU_SOURCE" = "builtin" ]; then
-		echo "[*] Pakai KernelSU bawaan source"
-		if [ ! -f drivers/kernelsu/Kconfig ] || ! grep -qi kernelsu drivers/Makefile \
-			|| ! grep -qi kernelsu drivers/Kconfig; then
-			echo "[×] KernelSU bawaan tidak lengkap di source ini (drivers/kernelsu, Makefile, Kconfig)."
-			echo "    Gunakan KSU_SOURCE=nadeko atau KSU=0."
+	find_ksu_kconfig
+	local mode="$KSU_SOURCE"
+	if [ "$mode" = "auto" ]; then
+		if [ -n "$KSU_KCONFIG" ]; then mode="builtin"; else mode="next"; fi
+		echo "[*] KSU_SOURCE=auto -> $mode"
+	fi
+
+	case "$mode" in
+	builtin)
+		if [ -z "$KSU_KCONFIG" ]; then
+			echo "[×] Source ini tidak punya KernelSU bawaan. Pakai KSU_SOURCE=next / sukisu, atau KSU=0."
 			exit 1
 		fi
-		KSU_HOOK="syscall-table"
-		local info
-		info="$(git log -1 --pretty=%s -- KernelSU 2>/dev/null | head -c 80 || true)"
-		KSU_TEXT="On (bundled, hook: ${KSU_HOOK})"
-		echo "[+] KernelSU: $KSU_TEXT"
-		[ -z "$info" ] || echo "    Commit KernelSU terakhir: $info"
-		return 0
-	fi
+		KSU_TAG="KSU"
+		KSU_TEXT="On (bundled: ${KSU_KCONFIG})"
+		;;
+	next)
+		clean_ksu
+		echo "[*] Pasang KernelSU-Next (branch legacy untuk non-GKI)"
+		curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+		KSU_TAG="KSUNEXT"
+		KSU_TEXT="On (KernelSU-Next legacy, hook: ${KSU_HOOK})"
+		;;
+	sukisu)
+		clean_ksu
+		echo "[*] Pasang SukiSU-Ultra"
+		curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
+		KSU_TAG="SUKISU"
+		KSU_TEXT="On (SukiSU-Ultra, hook: ${KSU_HOOK})"
+		;;
+	*)
+		echo "[×] KSU_SOURCE='$KSU_SOURCE' tidak dikenal (auto|builtin|next|sukisu)"
+		exit 1
+		;;
+	esac
+	KSU_MODE="$mode"
 
-	echo "[*] Bersihkan KernelSU bawaan source"
-	rm -rf KernelSU drivers/kernelsu drivers/KernelSU
-	sed -i '/kernelsu/Id' drivers/Makefile drivers/Kconfig
-
-	echo "[*] Setup NadekoSU"
-	curl -LSs "$NADEKO_SETUP_URL" | bash -
-
-	if [ ! -f KernelSU/kernel/Kconfig ]; then
-		echo "[×] Setup NadekoSU gagal: KernelSU/kernel/Kconfig tidak ada."
+	find_ksu_kconfig
+	if [ -z "$KSU_KCONFIG" ]; then
+		echo "[×] Setelah setup, Kconfig 'config KSU' tidak ditemukan. Integrasi gagal."
 		exit 1
 	fi
-	if ! grep -qi kernelsu drivers/Makefile || ! grep -qi kernelsu drivers/Kconfig; then
-		echo "[×] drivers/Makefile atau drivers/Kconfig belum memuat kernelsu."
-		exit 1
+	if [ "$mode" != "builtin" ]; then
+		if ! grep -qi kernelsu drivers/Makefile || ! grep -qi kernelsu drivers/Kconfig; then
+			echo "[×] drivers/Makefile atau drivers/Kconfig belum memuat kernelsu."
+			exit 1
+		fi
 	fi
-
-	local cnt ver
-	cnt="$(cd KernelSU && git rev-list --count HEAD 2>/dev/null || echo 0)"
-	ver=$((33300 + cnt))
-
-	# Kernel 4.19 hanya cocok dengan hook manual (dipasang di apply_ksu_patch)
-	if ! grep -q "KSU_MANUAL_HOOK" KernelSU/kernel/Kconfig; then
-		echo "[×] NadekoSU ini tidak punya KSU_MANUAL_HOOK. Tidak bisa dipakai di kernel 4.19."
-		exit 1
-	fi
-	KSU_HOOK="manual"
-	KSU_TEXT="On (NadekoSU ${ver}, hook: ${KSU_HOOK})"
 	echo "[+] KernelSU: $KSU_TEXT"
-}
+	echo "    Kconfig : $KSU_KCONFIG"
 
-# NadekoSU (kernel 4.19) butuh hook manual. Source ye TIDAK punya hook KernelSU
-# apa pun (KernelSU bawaannya memakai syscall table), jadi hook dipasang di sini
-# langsung ke: fs/exec.c, fs/open.c, fs/stat.c, kernel/reboot.c.
-# Hook setuid / init.rc / input ditangani otomatis lewat LSM & input_handler
-# (opsi KSU_MANUAL_HOOK_AUTO_*), jadi tidak perlu edit kernel/sys.c,
-# fs/read_write.c, atau drivers/input/input.c.
-apply_ksu_patch()
-{
-	[ "$KSU" = "1" ] && [ "$KSU_HOOK" = "manual" ] || return 0
-	cd "$KERNEL"
-
-	command -v python3 >/dev/null 2>&1 || { echo "[×] python3 tidak ditemukan (dibutuhkan untuk memasang hook)."; exit 1; }
-
-	local hp="$WORKDIR/ksu_hooks.py"
-	cat > "$hp" <<'PYEOF'
-"""Pasang hook manual NadekoSU ke kernel 4.19 (idempotent, gagal keras bila anchor tidak cocok)."""
-import re, sys, os
-
-root = sys.argv[1] if len(sys.argv) > 1 else "."
-fail = []
-
-def edit(path, fn, marker, desc):
-    p = os.path.join(root, path)
-    s = open(p, encoding="utf-8", errors="surrogateescape").read()
-    if marker in s:
-        print(f"[=] {path}: {desc} sudah ada")
-        return
-    n = fn(s)
-    if n is None or n == s:
-        fail.append(f"{path}: {desc}")
-        print(f"[x] {path}: {desc} GAGAL (anchor tidak cocok)")
-        return
-    open(p, "w", encoding="utf-8", errors="surrogateescape").write(n)
-    print(f"[+] {path}: {desc}")
-
-def sub1(pattern, repl, s, flags=re.M | re.S):
-    n, c = re.subn(pattern, repl, s, count=1, flags=flags)
-    return n if c == 1 else None
-
-# ---- fs/exec.c : do_execveat_common (wrapper -> __do_execve_file)
-def exec_fn(s):
-    decl = ("#ifdef CONFIG_KSU\n"
-            "extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv,\n"
-            "\t\t\t\tvoid *envp, int *flags);\n"
-            "#endif\n\n")
-    pat = r"(static int do_execveat_common\(int fd, struct filename \*filename,\s*struct user_arg_ptr argv,\s*struct user_arg_ptr envp,\s*int flags\)\s*\{\n)(\treturn __do_execve_file\(fd, filename, argv, envp, flags, NULL\);)"
-    def r(m):
-        return (decl + m.group(1) +
-                "#ifdef CONFIG_KSU\n\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n#endif\n" +
-                m.group(2))
-    return sub1(pat, r, s)
-edit("fs/exec.c", exec_fn, "ksu_handle_execveat", "hook execveat")
-
-# ---- fs/open.c : do_faccessat
-def open_fn(s):
-    decl = ("#ifdef CONFIG_KSU\n"
-            "extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode,\n"
-            "\t\t\t\t int *__unused_flags);\n"
-            "#endif\n\n")
-    pat = r"(/\*\n \* access\(\) needs to use the real uid/gid.*?\n \*/\n)?(long do_faccessat\(int dfd, const char __user \*filename, int mode\)\n\{\n(?:.*?\n)*?\tunsigned int lookup_flags = LOOKUP_FOLLOW;\n)"
-    m = re.search(pat, s, re.S)
-    if not m:
-        return None
-    start = m.start()
-    # sisipkan deklarasi sebelum blok komentar/fungsi, dan call setelah deklarasi variabel
-    head = s[:m.start()]
-    block = m.group(0)
-    call = "\n#ifdef CONFIG_KSU\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif\n"
-    block = block + call
-    return head + decl + block + s[m.end():]
-edit("fs/open.c", open_fn, "ksu_handle_faccessat", "hook faccessat")
-
-# ---- fs/stat.c : vfs_statx, newfstat, fstat64
-def stat_fn(s):
-    decl = ("#ifdef CONFIG_KSU\n"
-            "extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n"
-            "extern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\n"
-            "#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)\n"
-            "extern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr);\n"
-            "#endif\n"
-            "#endif\n\n")
-    # 1) deklarasi sebelum blok komentar vfs_statx
-    pat = r"(/\*\*\n \* vfs_statx - Get basic and extra attributes by filename)"
-    n = sub1(pat, lambda m: decl + m.group(1), s)
-    if n is None: return None
-    s = n
-    # 2) call di awal vfs_statx (setelah deklarasi variabel)
-    pat = (r"(int vfs_statx\(int dfd, const char __user \*filename, int flags,\s*struct kstat \*stat, u32 request_mask\)\n\{\n"
-           r"\tstruct path path;\n\tint error = -EINVAL;\n\tunsigned int lookup_flags = LOOKUP_FOLLOW \| LOOKUP_AUTOMOUNT;\n)")
-    n = sub1(pat, lambda m: m.group(1) + "\n#ifdef CONFIG_KSU\n\tksu_handle_stat(&dfd, &filename, &flags);\n#endif\n", s)
-    if n is None: return None
-    s = n
-    # 3) newfstat
-    pat = (r"(SYSCALL_DEFINE2\(newfstat, unsigned int, fd, struct stat __user \*, statbuf\)\n\{\n"
-           r"\tstruct kstat stat;\n\tint error = vfs_fstat\(fd, &stat\);\n\n\tif \(!error\)\n\t\terror = cp_new_stat\(&stat, statbuf\);\n)(\n\treturn error;)")
-    n = sub1(pat, lambda m: m.group(1) + "\n#ifdef CONFIG_KSU\n\tksu_handle_newfstat_ret(&fd, &statbuf);\n#endif\n" + m.group(2), s)
-    if n is None: return None
-    s = n
-    # 4) fstat64
-    pat = (r"(SYSCALL_DEFINE2\(fstat64, unsigned long, fd, struct stat64 __user \*, statbuf\)\n\{\n"
-           r"\tstruct kstat stat;\n\tint error = vfs_fstat\(fd, &stat\);\n\n\tif \(!error\)\n\t\terror = cp_new_stat64\(&stat, statbuf\);\n)(\n\treturn error;)")
-    n = sub1(pat, lambda m: m.group(1) + "\n#ifdef CONFIG_KSU\n\tksu_handle_fstat64_ret(&fd, &statbuf);\n#endif\n" + m.group(2), s)
-    return n
-edit("fs/stat.c", stat_fn, "ksu_handle_stat", "hook stat/newfstat/fstat64")
-
-# ---- kernel/reboot.c : reboot syscall
-def reboot_fn(s):
-    decl = ("#ifdef CONFIG_KSU\n"
-            "extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n"
-            "#endif\n\n")
-    pat = r"(SYSCALL_DEFINE4\(reboot, int, magic1, int, magic2, unsigned int, cmd,\s*void __user \*, arg\)\n\{\n\tstruct pid_namespace \*pid_ns = task_active_pid_ns\(current\);\n\tchar buffer\[256\];\n\tint ret = 0;\n)"
-    return sub1(pat, lambda m: decl + m.group(1) + "\n#ifdef CONFIG_KSU\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif\n", s)
-edit("kernel/reboot.c", reboot_fn, "ksu_handle_sys_reboot", "hook reboot")
-
-if fail:
-    print("\n[x] Hook gagal dipasang:\n  " + "\n  ".join(fail))
-    sys.exit(1)
-print("[+] Semua hook manual terpasang")
-PYEOF
-	echo "[*] Pasang hook manual NadekoSU"
-	python3 "$hp" "$KERNEL" || { echo "[×] Pemasangan hook gagal, source berbeda dari yang diperkirakan."; exit 1; }
-
-	# Verifikasi sama seperti manual_hook_check.mk milik NadekoSU
-	local miss=0 pair f h
-	for pair in \
-		"fs/exec.c:ksu_handle_execveat" \
-		"fs/open.c:ksu_handle_faccessat" \
-		"fs/stat.c:ksu_handle_stat" \
-		"fs/stat.c:ksu_handle_newfstat_ret" \
-		"fs/stat.c:ksu_handle_fstat64_ret" \
-		"kernel/reboot.c:ksu_handle_sys_reboot"; do
-		f="${pair%%:*}"; h="${pair##*:}"
-		if grep -q "$h" "$f"; then echo "[+] hook $h ada di $f"; else echo "[×] hook $h HILANG di $f"; miss=1; fi
-	done
-	[ "$miss" = 0 ] || exit 1
-
-	# KALLSYMS_ALL tidak bisa aktif di defconfig ini (butuh DEBUG_KERNEL), maka
-	# NadekoSU meminta simbol SELinux diekspor (hapus 'static'), sesuai
-	# tools/static_export_check.mk. Kernel 4.19 hanya butuh dua simbol ini.
-	echo "[*] Ekspor simbol static SELinux"
-	sed -i 's/^static const struct file_operations sel_handle_status_ops/const struct file_operations sel_handle_status_ops/' security/selinux/selinuxfs.c
-	sed -i 's/^static ssize_t (\*const write_op\[\])/ssize_t (*const write_op[])/' security/selinux/selinuxfs.c
-	if grep -q '^static const struct file_operations sel_handle_status_ops' security/selinux/selinuxfs.c \
-		|| ! grep -q '^const struct file_operations sel_handle_status_ops' security/selinux/selinuxfs.c; then
-		echo "[×] sel_handle_status_ops gagal diekspor di security/selinux/selinuxfs.c"
-		exit 1
+	if [ "$KSU_HOOK" = "manual" ]; then
+		if ! grep -qs 'ksu_handle_' fs/exec.c fs/open.c; then
+			echo "[×] KSU_HOOK=manual, tetapi hook ksu_handle_* tidak ada di fs/exec.c / fs/open.c."
+			echo "    Hook manual harus sudah ada di source. Pakai KSU_HOOK=kprobes."
+			exit 1
+		fi
 	fi
-	if grep -q '^static ssize_t (\*const write_op\[\])' security/selinux/selinuxfs.c \
-		|| ! grep -q '^ssize_t (\*const write_op\[\])' security/selinux/selinuxfs.c; then
-		echo "[×] write_op gagal diekspor di security/selinux/selinuxfs.c"
-		exit 1
-	fi
-	echo "[+] sel_handle_status_ops dan write_op diekspor"
 }
 
 notify_start()
@@ -472,7 +394,8 @@ notify_start()
 		"<b>Device:</b> <code>${MODEL} (${DEVICE})</code>" \
 		"<b>Kernel:</b> <code>${KERVER}</code>" \
 		"<b>Defconfig:</b> <code>${DEFCONFIG}</code>" \
-		"<b>KernelSU:</b> <code>${KSU_TEXT}</code>" \
+		"<b>Toolchain:</b> <code>${CLANG_VER}</code>" \
+		"<b>Root:</b> <code>${KSU_TEXT}</code>" \
 		"<b>Core:</b> <code>$(nproc --all)</code>" \
 		"<b>Commit:</b> <code>${COMMIT_SHORT} - ${msg}</code>")" || true
 }
@@ -481,99 +404,154 @@ build_kernel()
 {
 	cd "$KERNEL"
 
-	export PATH="$CLANG_DIR/bin:$TC/gcc64/bin:$TC/gcc32/bin:$PATH"
 	export ARCH=arm64 SUBARCH=arm64
 	export KBUILD_BUILD_USER="$AUTHOR"
 	export KBUILD_BUILD_HOST="github-actions"
-	export LOCALVERSION="-${KERNEL_NAME}"
+	[ -z "${CUSTOM_LOCALVERSION:-}" ] || export LOCALVERSION="$CUSTOM_LOCALVERSION"
 
 	local ARGS=(
 		O=out ARCH=arm64
-		LLVM=1 LLVM_IAS=1
+		LLVM=1 LLVM_IAS="$LLVM_IAS"
 		CC=clang HOSTCC=clang HOSTCXX=clang++
 		PYTHON=python3
-		CROSS_COMPILE=aarch64-linux-android-
-		CROSS_COMPILE_ARM32=arm-linux-androideabi-
-		CLANG_TRIPLE=aarch64-linux-gnu-
+		CROSS_COMPILE="$CROSS64"
+		CROSS_COMPILE_ARM32="$CROSS32"
+		CLANG_TRIPLE="$CLANG_TRIPLE_V"
 		KCFLAGS=-Wno-error
 	)
+	local CFG=(scripts/config --file out/.config)
 
 	echo "[*] make defconfig"
 	rm -rf out
 	make "${ARGS[@]}" "$DEFCONFIG"
 
-	if [ -n "$FOG_CFG" ]; then
-		echo "[*] Merge fragment: $FOG_CFG"
-		scripts/kconfig/merge_config.sh -m -O out out/.config "arch/arm64/configs/$FOG_CFG"
+	local f
+	for f in $FRAGMENTS; do
+		echo "[*] Merge fragment: $f"
+		scripts/kconfig/merge_config.sh -m -O out out/.config "arch/arm64/configs/$f"
+	done
+
+	# Wajib untuk mount modul root
+	"${CFG[@]}" -e OVERLAY_FS
+	# vDSO 32-bit sering gagal dengan clang
+	"${CFG[@]}" -d COMPAT_VDSO
+
+	if [ "$ENABLE_LTO" != "1" ]; then
+		"${CFG[@]}" -d LTO_CLANG -d THINLTO -d CFI_CLANG -d CFI_PERMISSIVE
 	fi
-
-	# Wajib untuk mount modul KernelSU
-	scripts/config --file out/.config -e OVERLAY_FS
-
-	# vDSO 32-bit gagal dengan clang
-	scripts/config --file out/.config -d COMPAT_VDSO
-
-	# Wajib agar target dtb.img & dtbo.img tersedia
-	scripts/config --file out/.config -e BUILD_ARM64_DT_OVERLAY
 
 	if [ "$KSU" = "1" ]; then
 		if [ "$KSU_HOOK" = "manual" ]; then
-			scripts/config --file out/.config \
-				-e KSU -e KSU_MANUAL_HOOK \
-				-e KSU_MANUAL_HOOK_AUTO_INPUT_HOOK \
-				-e KSU_MANUAL_HOOK_AUTO_SETUID_HOOK \
-				-e KSU_MANUAL_HOOK_AUTO_INITRC_HOOK \
-				-d KSU_TRACEPOINT_HOOK -d KSU_SUSFS
+			"${CFG[@]}" -e KSU -e KSU_MANUAL_HOOK -d KPROBES
 		else
-			scripts/config --file out/.config -e KSU
+			# KPROBES di 4.19 bergantung pada MODULES
+			"${CFG[@]}" -e MODULES -e KPROBES -e KSU -d KSU_MANUAL_HOOK
 		fi
 	fi
 	make "${ARGS[@]}" olddefconfig
 
-	# Patch hook manual dilakukan setelah config siap (mode nadeko)
-	apply_ksu_patch
-
-	if ! grep -Eq '^CONFIG_BUILD_ARM64_DT_OVERLAY=y' out/.config; then
-		echo "[×] CONFIG_BUILD_ARM64_DT_OVERLAY=y tidak aktif, dtb.img/dtbo.img tidak bisa dibuat."
-		exit 1
-	fi
-
 	if [ "$KSU" = "1" ]; then
-		echo "--- CONFIG KernelSU di out/.config ---"
-		grep -E '^CONFIG_(KSU|OVERLAY_FS|KPROBES)' out/.config || true
+		echo "--- CONFIG root di out/.config ---"
+		grep -E '^CONFIG_(KSU|OVERLAY_FS|KPROBES|MODULES|EXT4_FS)=' out/.config || true
 		if ! grep -Eq '^CONFIG_KSU=y' out/.config; then
-			echo "[×] CONFIG_KSU=y tidak aktif setelah olddefconfig. Dihentikan agar tidak menghasilkan kernel tanpa root."
+			echo "[×] CONFIG_KSU=y tidak aktif setelah olddefconfig (dependency tidak terpenuhi)."
+			echo "    Dihentikan agar tidak menghasilkan kernel tanpa root."
 			exit 1
 		fi
-		if [ "$KSU_HOOK" = "manual" ]; then
-			if ! grep -Eq '^CONFIG_KSU_MANUAL_HOOK=y' out/.config; then
-				echo "[×] CONFIG_KSU_MANUAL_HOOK=y tidak aktif setelah olddefconfig."
-				exit 1
-			fi
-		fi
-		if [ "$KSU_HOOK" = "syscall-table" ] && ! grep -Eq '^CONFIG_KSU_TAMPER_SYSCALL_TABLE=y' out/.config; then
-			echo "[×] CONFIG_KSU_TAMPER_SYSCALL_TABLE tidak aktif (bergantung !CFI_CLANG). Root tidak akan berfungsi."
+		if [ "$KSU_HOOK" != "manual" ] && ! grep -Eq '^CONFIG_KPROBES=y' out/.config; then
+			echo "[×] CONFIG_KPROBES=y tidak aktif. Hook kprobes tidak bisa dipakai di source ini."
 			exit 1
 		fi
-		echo "[+] KernelSU AKTIF"
+		echo "[+] Root AKTIF"
 	fi
 
 	echo "[*] Mulai kompilasi"
-	local START END
+	local START END targets
+	if grep -Eq '^CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y' out/.config; then
+		APPENDED=1
+		targets="Image.gz-dtb"
+	else
+		APPENDED=0
+		targets="Image.gz dtbs"
+		echo "[!] APPENDED_DTB_IMAGE tidak aktif: DTB tidak digabung ke kernel."
+	fi
 	START=$(date +%s)
-	make -j"$(nproc --all)" "${ARGS[@]}" Image.gz dtb.img dtbo.img
+	# shellcheck disable=SC2086
+	make -j"$(nproc --all)" "${ARGS[@]}" $targets
 	END=$(date +%s)
 	BUILD_TIME="$(( (END-START)/60 ))m $(( (END-START)%60 ))s"
 
-	local BOOT=out/arch/arm64/boot f
+	KREL="$(make -s "${ARGS[@]}" kernelrelease 2>/dev/null | tail -n1 || true)"
+	[ -n "$KREL" ] || KREL="$KERVER"
+
+	local BOOT=out/arch/arm64/boot
 	ls -la "$BOOT" || true
-	for f in Image.gz dtb.img dtbo.img; do
-		if [ ! -s "$BOOT/$f" ]; then
-			echo "[×] File hasil build tidak ada: $BOOT/$f"
-			exit 1
-		fi
+	KIMG=""
+	for f in Image.gz-dtb Image.gz Image; do
+		if [ -s "$BOOT/$f" ]; then KIMG="$f"; break; fi
 	done
-	echo "[+] Kernel berhasil dikompilasi dalam $BUILD_TIME"
+	if [ -z "$KIMG" ]; then
+		echo "[×] Tidak ada Image hasil build di $BOOT"
+		exit 1
+	fi
+	if [ "$APPENDED" = 1 ] && [ "$KIMG" != "Image.gz-dtb" ]; then
+		echo "[×] APPENDED_DTB aktif tetapi Image.gz-dtb tidak terbentuk."
+		exit 1
+	fi
+	echo "[+] Kernel berhasil dikompilasi dalam $BUILD_TIME ($KIMG)"
+	echo "[+] kernelrelease: $KREL"
+	echo "[!] Jika ROM memakai modul vendor (.ko), kernelrelease harus sama dengan kernel bawaan ROM."
+}
+
+# anykernel.sh khusus rolex/riva (boot partition tunggal, bukan A/B)
+write_anykernel()
+{
+	cat > "$AK3/anykernel.sh" <<'AKEOF'
+### AnyKernel3 Ramdisk Mod Script
+## Shisouka Kernel - Redmi 4A (rolex) / Redmi 5A (riva)
+
+## AnyKernel setup
+# begin properties
+properties() { '
+kernel.string=Shisouka Kernel for Redmi 4A / 5A (rova)
+do.devicecheck=1
+do.modules=0
+do.systemless=0
+do.cleanup=1
+do.cleanuponabort=0
+device.name1=rolex
+device.name2=riva
+device.name3=rova
+device.name4=
+device.name5=
+supported.versions=
+supported.patchlevels=
+supported.vendorpatchlevels=
+'; } # end properties
+
+### AnyKernel install
+## boot files attributes
+boot_attributes() {
+set_perm_recursive 0 0 755 644 $RAMDISK/*;
+set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;
+} # end attributes
+
+# boot shell variables (huruf besar = AK3 baru, huruf kecil = AK3 lama)
+BLOCK=/dev/block/bootdevice/by-name/boot;
+IS_SLOT_DEVICE=0;
+RAMDISK_COMPRESSION=auto;
+PATCH_VBMETA_FLAG=auto;
+block=/dev/block/bootdevice/by-name/boot;
+is_slot_device=0;
+ramdisk_compression=auto;
+
+# import functions/variables and setup patching - see for reference (DO NOT REMOVE)
+. tools/ak3-core.sh;
+
+# boot install: ganti kernel saja, ramdisk bawaan ROM dipertahankan
+split_boot;
+flash_boot;
+AKEOF
 }
 
 gen_zip()
@@ -582,25 +560,21 @@ gen_zip()
 	local STAMP NAME
 	STAMP="$(date +%Y%m%d-%H%M)"
 	NAME="${KERNEL_NAME}-${DEVICE}"
-	if [ "$KSU" = "1" ]; then
-		if [ "$KSU_SOURCE" = "nadeko" ]; then NAME="${NAME}-NDKSU"; else NAME="${NAME}-KSU"; fi
-	fi
+	[ -z "$KSU_TAG" ] || NAME="${NAME}-${KSU_TAG}"
 	NAME="${NAME}-${STAMP}-${COMMIT_SHORT}.zip"
 
-	echo "[*] Cek device di anykernel.sh"
-	grep -nE 'device\.name|do\.devicecheck' "$AK3/anykernel.sh" || true
-	if ! grep -qiE 'device\.name[0-9]*=(fog|wind|rain)' "$AK3/anykernel.sh"; then
-		echo "[!] anykernel.sh tidak menyebut fog/wind/rain. Zip mungkin ditolak recovery."
-	fi
+	write_anykernel
+	echo "[*] anykernel.sh untuk rolex/riva:"
+	grep -nE 'device\.name|BLOCK=|IS_SLOT_DEVICE' "$AK3/anykernel.sh" || true
 
-	cp "$BOOT/Image.gz" "$AK3/Image.gz"
-	cp "$BOOT/dtb.img"  "$AK3/dtb.img"
-	cp "$BOOT/dtbo.img" "$AK3/dtbo.img"
+	# Bersihkan sisa kernel lama (kalau ada) lalu salin hasil build
+	rm -f "$AK3"/Image* "$AK3"/zImage* "$AK3"/*.img 2>/dev/null || true
+	cp "$BOOT/$KIMG" "$AK3/$KIMG"
 	ls -la "$AK3"
 
 	echo "[*] Zipping into a flashable zip"
 	mkdir -p "$OUTDIR"
-	(cd "$AK3" && zip -r9 "$OUTDIR/$NAME" . -x ".git*" -x "README.md" -x "*.zip")
+	(cd "$AK3" && zip -r9 "$OUTDIR/$NAME" . -x ".git*" -x "README.md" -x "LICENSE" -x "*.zip")
 
 	ZIP_FINAL="$OUTDIR/$NAME"
 	ZIP_MD5="$(md5sum "$ZIP_FINAL" | cut -d' ' -f1)"
@@ -618,8 +592,9 @@ send_zip()
 
 	caption="$(printf '%s\n' \
 		"<b>${KERNEL_NAME}</b> for ${MODEL}" \
+		"Kernel: <code>${KREL}</code>" \
 		"Build time: <code>${BUILD_TIME}</code>" \
-		"KernelSU: <code>${KSU_TEXT}</code>" \
+		"Root: <code>${KSU_TEXT}</code>" \
 		"Commit: <code>${COMMIT_SHORT}</code>" \
 		"MD5: <code>${ZIP_MD5}</code>")"
 
@@ -639,6 +614,7 @@ send_zip()
 ##------------------------ Main ------------------------##
 
 tg_init
+ensure_deps
 clone_kernel
 validate_defconfig
 setup_toolchain
