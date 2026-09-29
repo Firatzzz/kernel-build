@@ -10,8 +10,8 @@
 #   DEFCONFIG     : defconfig relatif terhadap arch/arm64/configs
 #   FOG_CFG       : fragment config tambahan (opsional)
 #   KSU           : 1 = aktifkan KernelSU | 0 = matikan
-#   KSU_SOURCE    : builtin = pakai KernelSU bawaan source ye (default, tanpa patch)
-#                   nadeko  = ganti dengan NadekoSU (butuh patchs/KernelSU.patch)
+#   KSU_SOURCE    : nadeko  = NadekoSU + hook manual, dipasang otomatis (default)
+#                   builtin = KernelSU bawaan source ye (hook syscall table)
 #   TG_BOT_TOKEN  : token bot Telegram (WAJIB dari GitHub Secrets)
 #   TG_CHAT_ID    : chat id grup Telegram (dari GitHub Secrets)
 
@@ -46,8 +46,8 @@ FOG_CFG="${FOG_CFG:-}"
 
 # KernelSU. 1 = YES | 0 = NO
 KSU="${KSU:-1}"
-# builtin = KernelSU bawaan source (backslashxx, hook syscall table) | nadeko = NadekoSU
-KSU_SOURCE="${KSU_SOURCE:-builtin}"
+# nadeko = NadekoSU + hook manual | builtin = KernelSU bawaan source (syscall table)
+KSU_SOURCE="${KSU_SOURCE:-nadeko}"
 
 # Push ke Telegram. 1 = YES | 0 = NO
 PTTG=1
@@ -298,7 +298,7 @@ prepare_ksu()
 	cnt="$(cd KernelSU && git rev-list --count HEAD 2>/dev/null || echo 0)"
 	ver=$((33300 + cnt))
 
-	# Kernel 4.19 hanya cocok dengan hook manual
+	# Kernel 4.19 hanya cocok dengan hook manual (dipasang di apply_ksu_patch)
 	if ! grep -q "KSU_MANUAL_HOOK" KernelSU/kernel/Kconfig; then
 		echo "[×] NadekoSU ini tidak punya KSU_MANUAL_HOOK. Tidak bisa dipakai di kernel 4.19."
 		exit 1
@@ -308,34 +308,141 @@ prepare_ksu()
 	echo "[+] KernelSU: $KSU_TEXT"
 }
 
-# Hanya untuk NadekoSU: source ye TIDAK punya hook KernelSU apa pun,
-# jadi patchs/KernelSU.patch wajib cocok dengan kernel 4.19.325 ini.
+# NadekoSU (kernel 4.19) butuh hook manual. Source ye TIDAK punya hook KernelSU
+# apa pun (KernelSU bawaannya memakai syscall table), jadi hook dipasang di sini
+# langsung ke: fs/exec.c, fs/open.c, fs/stat.c, kernel/reboot.c.
+# Hook setuid / init.rc / input ditangani otomatis lewat LSM & input_handler
+# (opsi KSU_MANUAL_HOOK_AUTO_*), jadi tidak perlu edit kernel/sys.c,
+# fs/read_write.c, atau drivers/input/input.c.
 apply_ksu_patch()
 {
 	[ "$KSU" = "1" ] && [ "$KSU_HOOK" = "manual" ] || return 0
 	cd "$KERNEL"
 
-	local p="$WORKDIR/patchs/KernelSU.patch"
-	if [ ! -f "$p" ]; then
-		echo "[×] $p tidak ditemukan. NadekoSU butuh patch hook manual."
-		exit 1
-	fi
+	command -v python3 >/dev/null 2>&1 || { echo "[×] python3 tidak ditemukan (dibutuhkan untuk memasang hook)."; exit 1; }
 
-	if patch -p1 --dry-run < "$p" >/dev/null 2>&1; then
-		patch -p1 < "$p"
-		echo "[+] KernelSU.patch diterapkan"
-	else
-		echo "[×] KernelSU.patch tidak cocok dengan source ye (kernel $KERVER)."
-		echo "    Pakai KSU_SOURCE=builtin atau buat ulang patch sesuai panduan NadekoSU."
-		patch -p1 --dry-run < "$p" 2>&1 | head -n 30 || true
-		exit 1
-	fi
+	local hp="$WORKDIR/ksu_hooks.py"
+	cat > "$hp" <<'PYEOF'
+"""Pasang hook manual NadekoSU ke kernel 4.19 (idempotent, gagal keras bila anchor tidak cocok)."""
+import re, sys, os
 
-	# ekspor simbol static yang dibutuhkan KernelSU
-	sed -i 's/^static const struct file_operations sel_handle_status_ops/const struct file_operations sel_handle_status_ops/' security/selinux/selinuxfs.c
-	sed -i 's/^static ssize_t (\*const write_op\[\])/ssize_t (*const write_op[])/' security/selinux/selinuxfs.c
-	sed -i 's/^static void security_dump_masked_av(/void security_dump_masked_av(/' security/selinux/ss/services.c
-	sed -i 's/^static void context_struct_compute_av(/void context_struct_compute_av(/' security/selinux/ss/services.c
+root = sys.argv[1] if len(sys.argv) > 1 else "."
+fail = []
+
+def edit(path, fn, marker, desc):
+    p = os.path.join(root, path)
+    s = open(p, encoding="utf-8", errors="surrogateescape").read()
+    if marker in s:
+        print(f"[=] {path}: {desc} sudah ada")
+        return
+    n = fn(s)
+    if n is None or n == s:
+        fail.append(f"{path}: {desc}")
+        print(f"[x] {path}: {desc} GAGAL (anchor tidak cocok)")
+        return
+    open(p, "w", encoding="utf-8", errors="surrogateescape").write(n)
+    print(f"[+] {path}: {desc}")
+
+def sub1(pattern, repl, s, flags=re.M | re.S):
+    n, c = re.subn(pattern, repl, s, count=1, flags=flags)
+    return n if c == 1 else None
+
+# ---- fs/exec.c : do_execveat_common (wrapper -> __do_execve_file)
+def exec_fn(s):
+    decl = ("#ifdef CONFIG_KSU\n"
+            "extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv,\n"
+            "\t\t\t\tvoid *envp, int *flags);\n"
+            "#endif\n\n")
+    pat = r"(static int do_execveat_common\(int fd, struct filename \*filename,\s*struct user_arg_ptr argv,\s*struct user_arg_ptr envp,\s*int flags\)\s*\{\n)(\treturn __do_execve_file\(fd, filename, argv, envp, flags, NULL\);)"
+    def r(m):
+        return (decl + m.group(1) +
+                "#ifdef CONFIG_KSU\n\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n#endif\n" +
+                m.group(2))
+    return sub1(pat, r, s)
+edit("fs/exec.c", exec_fn, "ksu_handle_execveat", "hook execveat")
+
+# ---- fs/open.c : do_faccessat
+def open_fn(s):
+    decl = ("#ifdef CONFIG_KSU\n"
+            "extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode,\n"
+            "\t\t\t\t int *__unused_flags);\n"
+            "#endif\n\n")
+    pat = r"(/\*\n \* access\(\) needs to use the real uid/gid.*?\n \*/\n)?(long do_faccessat\(int dfd, const char __user \*filename, int mode\)\n\{\n(?:.*?\n)*?\tunsigned int lookup_flags = LOOKUP_FOLLOW;\n)"
+    m = re.search(pat, s, re.S)
+    if not m:
+        return None
+    start = m.start()
+    # sisipkan deklarasi sebelum blok komentar/fungsi, dan call setelah deklarasi variabel
+    head = s[:m.start()]
+    block = m.group(0)
+    call = "\n#ifdef CONFIG_KSU\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif\n"
+    block = block + call
+    return head + decl + block + s[m.end():]
+edit("fs/open.c", open_fn, "ksu_handle_faccessat", "hook faccessat")
+
+# ---- fs/stat.c : vfs_statx, newfstat, fstat64
+def stat_fn(s):
+    decl = ("#ifdef CONFIG_KSU\n"
+            "extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n"
+            "extern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\n"
+            "#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)\n"
+            "extern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr);\n"
+            "#endif\n"
+            "#endif\n\n")
+    # 1) deklarasi sebelum blok komentar vfs_statx
+    pat = r"(/\*\*\n \* vfs_statx - Get basic and extra attributes by filename)"
+    n = sub1(pat, lambda m: decl + m.group(1), s)
+    if n is None: return None
+    s = n
+    # 2) call di awal vfs_statx (setelah deklarasi variabel)
+    pat = (r"(int vfs_statx\(int dfd, const char __user \*filename, int flags,\s*struct kstat \*stat, u32 request_mask\)\n\{\n"
+           r"\tstruct path path;\n\tint error = -EINVAL;\n\tunsigned int lookup_flags = LOOKUP_FOLLOW \| LOOKUP_AUTOMOUNT;\n)")
+    n = sub1(pat, lambda m: m.group(1) + "\n#ifdef CONFIG_KSU\n\tksu_handle_stat(&dfd, &filename, &flags);\n#endif\n", s)
+    if n is None: return None
+    s = n
+    # 3) newfstat
+    pat = (r"(SYSCALL_DEFINE2\(newfstat, unsigned int, fd, struct stat __user \*, statbuf\)\n\{\n"
+           r"\tstruct kstat stat;\n\tint error = vfs_fstat\(fd, &stat\);\n\n\tif \(!error\)\n\t\terror = cp_new_stat\(&stat, statbuf\);\n)(\n\treturn error;)")
+    n = sub1(pat, lambda m: m.group(1) + "\n#ifdef CONFIG_KSU\n\tksu_handle_newfstat_ret(&fd, &statbuf);\n#endif\n" + m.group(2), s)
+    if n is None: return None
+    s = n
+    # 4) fstat64
+    pat = (r"(SYSCALL_DEFINE2\(fstat64, unsigned long, fd, struct stat64 __user \*, statbuf\)\n\{\n"
+           r"\tstruct kstat stat;\n\tint error = vfs_fstat\(fd, &stat\);\n\n\tif \(!error\)\n\t\terror = cp_new_stat64\(&stat, statbuf\);\n)(\n\treturn error;)")
+    n = sub1(pat, lambda m: m.group(1) + "\n#ifdef CONFIG_KSU\n\tksu_handle_fstat64_ret(&fd, &statbuf);\n#endif\n" + m.group(2), s)
+    return n
+edit("fs/stat.c", stat_fn, "ksu_handle_stat", "hook stat/newfstat/fstat64")
+
+# ---- kernel/reboot.c : reboot syscall
+def reboot_fn(s):
+    decl = ("#ifdef CONFIG_KSU\n"
+            "extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n"
+            "#endif\n\n")
+    pat = r"(SYSCALL_DEFINE4\(reboot, int, magic1, int, magic2, unsigned int, cmd,\s*void __user \*, arg\)\n\{\n\tstruct pid_namespace \*pid_ns = task_active_pid_ns\(current\);\n\tchar buffer\[256\];\n\tint ret = 0;\n)"
+    return sub1(pat, lambda m: decl + m.group(1) + "\n#ifdef CONFIG_KSU\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif\n", s)
+edit("kernel/reboot.c", reboot_fn, "ksu_handle_sys_reboot", "hook reboot")
+
+if fail:
+    print("\n[x] Hook gagal dipasang:\n  " + "\n  ".join(fail))
+    sys.exit(1)
+print("[+] Semua hook manual terpasang")
+PYEOF
+	echo "[*] Pasang hook manual NadekoSU"
+	python3 "$hp" "$KERNEL" || { echo "[×] Pemasangan hook gagal, source berbeda dari yang diperkirakan."; exit 1; }
+
+	# Verifikasi sama seperti manual_hook_check.mk milik NadekoSU
+	local miss=0 pair f h
+	for pair in \
+		"fs/exec.c:ksu_handle_execveat" \
+		"fs/open.c:ksu_handle_faccessat" \
+		"fs/stat.c:ksu_handle_stat" \
+		"fs/stat.c:ksu_handle_newfstat_ret" \
+		"fs/stat.c:ksu_handle_fstat64_ret" \
+		"kernel/reboot.c:ksu_handle_sys_reboot"; do
+		f="${pair%%:*}"; h="${pair##*:}"
+		if grep -q "$h" "$f"; then echo "[+] hook $h ada di $f"; else echo "[×] hook $h HILANG di $f"; miss=1; fi
+	done
+	[ "$miss" = 0 ] || exit 1
 }
 
 notify_start()
@@ -397,7 +504,9 @@ build_kernel()
 				-e KSU -e KSU_MANUAL_HOOK \
 				-e KSU_MANUAL_HOOK_AUTO_INPUT_HOOK \
 				-e KSU_MANUAL_HOOK_AUTO_SETUID_HOOK \
-				-e KSU_MANUAL_HOOK_AUTO_INITRC_HOOK
+				-e KSU_MANUAL_HOOK_AUTO_INITRC_HOOK \
+				-d KSU_TRACEPOINT_HOOK -d KSU_SUSFS \
+				-e KALLSYMS -e KALLSYMS_ALL
 		else
 			scripts/config --file out/.config -e KSU
 		fi
@@ -414,10 +523,20 @@ build_kernel()
 
 	if [ "$KSU" = "1" ]; then
 		echo "--- CONFIG KernelSU di out/.config ---"
-		grep -E '^CONFIG_(KSU|OVERLAY_FS|KPROBES)' out/.config || true
+		grep -E '^CONFIG_(KSU|OVERLAY_FS|KPROBES|KALLSYMS_ALL)' out/.config || true
 		if ! grep -Eq '^CONFIG_KSU=y' out/.config; then
 			echo "[×] CONFIG_KSU=y tidak aktif setelah olddefconfig. Dihentikan agar tidak menghasilkan kernel tanpa root."
 			exit 1
+		fi
+		if [ "$KSU_HOOK" = "manual" ]; then
+			if ! grep -Eq '^CONFIG_KSU_MANUAL_HOOK=y' out/.config; then
+				echo "[×] CONFIG_KSU_MANUAL_HOOK=y tidak aktif setelah olddefconfig."
+				exit 1
+			fi
+			if ! grep -Eq '^CONFIG_KALLSYMS_ALL=y' out/.config; then
+				echo "[×] CONFIG_KALLSYMS_ALL=y tidak aktif (dibutuhkan NadekoSU untuk mencari simbol SELinux)."
+				exit 1
+			fi
 		fi
 		if [ "$KSU_HOOK" = "syscall-table" ] && ! grep -Eq '^CONFIG_KSU_TAMPER_SYSCALL_TABLE=y' out/.config; then
 			echo "[×] CONFIG_KSU_TAMPER_SYSCALL_TABLE tidak aktif (bergantung !CFI_CLANG). Root tidak akan berfungsi."
