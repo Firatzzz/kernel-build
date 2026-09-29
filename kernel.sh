@@ -193,6 +193,17 @@ validate_defconfig()
 		fi
 		DEFCONFIG="$found"
 	fi
+	# bengal-perf TIDAK punya CONFIG_BUILD_ARM64_DT_OVERLAY, sehingga target
+	# dtb.img/dtbo.img tidak ada ("No rule to make target 'dtb.img'").
+	# Workflow sering masih mengirim DEFCONFIG=bengal-perf, jadi paksa ke fog-perf.
+	case "$DEFCONFIG" in
+		vendor/bengal-perf_defconfig|vendor/bengal_defconfig)
+			if [ -f "$cfg_dir/vendor/fog-perf_defconfig" ]; then
+				echo "[!] $DEFCONFIG diganti ke vendor/fog-perf_defconfig (butuh dtb.img/dtbo.img)"
+				DEFCONFIG="vendor/fog-perf_defconfig"
+			fi
+			;;
+	esac
 	echo "[+] Defconfig dipakai: $DEFCONFIG"
 
 	# Fragment KernelSU bawaan source ye hanya untuk mode builtin
@@ -377,6 +388,9 @@ build_kernel()
 	# vDSO 32-bit gagal dengan clang
 	scripts/config --file out/.config -d COMPAT_VDSO
 
+	# Wajib agar target dtb.img & dtbo.img tersedia
+	scripts/config --file out/.config -e BUILD_ARM64_DT_OVERLAY
+
 	if [ "$KSU" = "1" ]; then
 		if [ "$KSU_HOOK" = "manual" ]; then
 			scripts/config --file out/.config \
@@ -392,6 +406,11 @@ build_kernel()
 
 	# Patch hook manual dilakukan setelah config siap (mode nadeko)
 	apply_ksu_patch
+
+	if ! grep -Eq '^CONFIG_BUILD_ARM64_DT_OVERLAY=y' out/.config; then
+		echo "[×] CONFIG_BUILD_ARM64_DT_OVERLAY=y tidak aktif, dtb.img/dtbo.img tidak bisa dibuat."
+		exit 1
+	fi
 
 	if [ "$KSU" = "1" ]; then
 		echo "--- CONFIG KernelSU di out/.config ---"
