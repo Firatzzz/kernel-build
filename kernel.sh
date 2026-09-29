@@ -443,6 +443,24 @@ PYEOF
 		if grep -q "$h" "$f"; then echo "[+] hook $h ada di $f"; else echo "[×] hook $h HILANG di $f"; miss=1; fi
 	done
 	[ "$miss" = 0 ] || exit 1
+
+	# KALLSYMS_ALL tidak bisa aktif di defconfig ini (butuh DEBUG_KERNEL), maka
+	# NadekoSU meminta simbol SELinux diekspor (hapus 'static'), sesuai
+	# tools/static_export_check.mk. Kernel 4.19 hanya butuh dua simbol ini.
+	echo "[*] Ekspor simbol static SELinux"
+	sed -i 's/^static const struct file_operations sel_handle_status_ops/const struct file_operations sel_handle_status_ops/' security/selinux/selinuxfs.c
+	sed -i 's/^static ssize_t (\*const write_op\[\])/ssize_t (*const write_op[])/' security/selinux/selinuxfs.c
+	if grep -q '^static const struct file_operations sel_handle_status_ops' security/selinux/selinuxfs.c \
+		|| ! grep -q '^const struct file_operations sel_handle_status_ops' security/selinux/selinuxfs.c; then
+		echo "[×] sel_handle_status_ops gagal diekspor di security/selinux/selinuxfs.c"
+		exit 1
+	fi
+	if grep -q '^static ssize_t (\*const write_op\[\])' security/selinux/selinuxfs.c \
+		|| ! grep -q '^ssize_t (\*const write_op\[\])' security/selinux/selinuxfs.c; then
+		echo "[×] write_op gagal diekspor di security/selinux/selinuxfs.c"
+		exit 1
+	fi
+	echo "[+] sel_handle_status_ops dan write_op diekspor"
 }
 
 notify_start()
@@ -505,8 +523,7 @@ build_kernel()
 				-e KSU_MANUAL_HOOK_AUTO_INPUT_HOOK \
 				-e KSU_MANUAL_HOOK_AUTO_SETUID_HOOK \
 				-e KSU_MANUAL_HOOK_AUTO_INITRC_HOOK \
-				-d KSU_TRACEPOINT_HOOK -d KSU_SUSFS \
-				-e KALLSYMS -e KALLSYMS_ALL
+				-d KSU_TRACEPOINT_HOOK -d KSU_SUSFS
 		else
 			scripts/config --file out/.config -e KSU
 		fi
@@ -523,7 +540,7 @@ build_kernel()
 
 	if [ "$KSU" = "1" ]; then
 		echo "--- CONFIG KernelSU di out/.config ---"
-		grep -E '^CONFIG_(KSU|OVERLAY_FS|KPROBES|KALLSYMS_ALL)' out/.config || true
+		grep -E '^CONFIG_(KSU|OVERLAY_FS|KPROBES)' out/.config || true
 		if ! grep -Eq '^CONFIG_KSU=y' out/.config; then
 			echo "[×] CONFIG_KSU=y tidak aktif setelah olddefconfig. Dihentikan agar tidak menghasilkan kernel tanpa root."
 			exit 1
@@ -531,10 +548,6 @@ build_kernel()
 		if [ "$KSU_HOOK" = "manual" ]; then
 			if ! grep -Eq '^CONFIG_KSU_MANUAL_HOOK=y' out/.config; then
 				echo "[×] CONFIG_KSU_MANUAL_HOOK=y tidak aktif setelah olddefconfig."
-				exit 1
-			fi
-			if ! grep -Eq '^CONFIG_KALLSYMS_ALL=y' out/.config; then
-				echo "[×] CONFIG_KALLSYMS_ALL=y tidak aktif (dibutuhkan NadekoSU untuk mencari simbol SELinux)."
 				exit 1
 			fi
 		fi
