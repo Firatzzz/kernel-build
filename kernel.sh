@@ -1,15 +1,19 @@
 #!/bin/bash
 # shellcheck disable=SC2154
 #
-# Build Shisouka Kernel - Redmi 10C (fog / SM6225) + NadekoSU
+# Build Shisouka Kernel - Redmi 10C (fog / SM6225)
+# Source : https://github.com/Firatzzz/kernel_xiaomi_sm6225 (branch ye)
 # Dijalankan dari GitHub Actions:  bash kernel.sh
 #
 # Variabel environment (dari workflow):
-#   KERNEL_BRANCH  : branch source kernel (kosong = default branch)
-#   DEFCONFIG      : defconfig relatif terhadap arch/arm64/configs
-#   KSU            : 1 = aktifkan NadekoSU | 0 = matikan
-#   TG_BOT_TOKEN   : token bot Telegram (WAJIB dari GitHub Secrets)
-#   TG_CHAT_ID     : chat id grup Telegram (dari GitHub Secrets)
+#   KERNEL_BRANCH : branch source kernel (default: ye)
+#   DEFCONFIG     : defconfig relatif terhadap arch/arm64/configs
+#   FOG_CFG       : fragment config tambahan (opsional)
+#   KSU           : 1 = aktifkan KernelSU | 0 = matikan
+#   KSU_SOURCE    : builtin = pakai KernelSU bawaan source ye (default, tanpa patch)
+#                   nadeko  = ganti dengan NadekoSU (butuh patchs/KernelSU.patch)
+#   TG_BOT_TOKEN  : token bot Telegram (WAJIB dari GitHub Secrets)
+#   TG_CHAT_ID    : chat id grup Telegram (dari GitHub Secrets)
 
 set -eo pipefail
 
@@ -24,7 +28,7 @@ OUTDIR="$WORKDIR/output"
 LOG="$WORKDIR/error.log"
 
 KERNEL_REPO="https://github.com/Firatzzz/kernel_xiaomi_sm6225"
-KERNEL_BRANCH="${KERNEL_BRANCH:-motregen}"
+KERNEL_BRANCH="${KERNEL_BRANCH:-ye}"
 ANYKERNEL_REPO="https://github.com/Kentanglu/AnyKernel3-680"
 CLANG_URL="https://github.com/ZyCromerZ/Clang/releases/download/17.0.0-20230725-release/Clang-17.0.0-20230725.tar.gz"
 GCC64_REPO="https://github.com/ZyCromerZ/aarch64-linux-android-4.9"
@@ -36,12 +40,14 @@ AUTHOR="Firatz"
 MODEL="Redmi 10C"
 DEVICE="fog"
 
-# Sama seperti build.sh sebelumnya: bengal-perf_defconfig + fragment fog.config
-DEFCONFIG="${DEFCONFIG:-vendor/bengal-perf_defconfig}"
-FOG_CFG="${FOG_CFG:-vendor/xiaomi/fog.config}"
+# Branch ye punya vendor/fog-perf_defconfig dan vendor/fog_ksu.config
+DEFCONFIG="${DEFCONFIG:-vendor/fog-perf_defconfig}"
+FOG_CFG="${FOG_CFG:-}"
 
-# NadekoSU. 1 = YES | 0 = NO
+# KernelSU. 1 = YES | 0 = NO
 KSU="${KSU:-1}"
+# builtin = KernelSU bawaan source (backslashxx, hook syscall table) | nadeko = NadekoSU
+KSU_SOURCE="${KSU_SOURCE:-builtin}"
 
 # Push ke Telegram. 1 = YES | 0 = NO
 PTTG=1
@@ -153,15 +159,16 @@ trap on_exit EXIT
 
 clone_kernel()
 {
-	echo "[*] Clone kernel source"
-	git clone --depth=1 ${KERNEL_BRANCH:+-b "$KERNEL_BRANCH"} "$KERNEL_REPO" "$KERNEL"
+	echo "[*] Clone kernel source: $KERNEL_REPO (branch: $KERNEL_BRANCH)"
+	git clone --depth=1 -b "$KERNEL_BRANCH" "$KERNEL_REPO" "$KERNEL"
 	cd "$KERNEL"
 
 	COMMIT_SHORT="$(git rev-parse --short HEAD)"
 	COMMIT_MSG="$(git log -1 --pretty=%s | tr -d '\r')"
 	COMMIT_HEAD="$(git log --oneline -1)"
 	BRANCH_NAME="$(git rev-parse --abbrev-ref HEAD)"
-	KERVER="$(make kernelversion 2>/dev/null || echo unknown)"
+	KERVER="$(make -s kernelversion 2>/dev/null | grep -E '^[0-9]' | head -n1 || true)"
+	[ -n "$KERVER" ] || KERVER="unknown"
 	echo "Branch  : $BRANCH_NAME"
 	echo "Commit  : $COMMIT_HEAD"
 	echo "Kernel  : $KERVER"
@@ -188,25 +195,18 @@ validate_defconfig()
 	fi
 	echo "[+] Defconfig dipakai: $DEFCONFIG"
 
-	# Fragment khusus fog (dari build.sh sebelumnya)
-	if [ -f "$cfg_dir/$FOG_CFG" ]; then
-		echo "[+] Fragment fog dipakai: $FOG_CFG"
-	else
-		echo "[!] $FOG_CFG tidak ada, mencari file *fog* di configs..."
-		find "$cfg_dir" -iname '*fog*' 2>/dev/null | head -n 20 || true
-		local alt
-		alt="$(find "$cfg_dir" -iname 'fog*.config' 2>/dev/null | head -n1 || true)"
-		if [ -n "$alt" ]; then
-			FOG_CFG="${alt#"$cfg_dir"/}"
-			echo "[+] Fragment fog pengganti: $FOG_CFG"
-		else
-			echo "[!] Tidak ada fragment fog, lanjut hanya dengan $DEFCONFIG"
-			FOG_CFG=""
-		fi
+	# Fragment KernelSU bawaan source ye hanya untuk mode builtin
+	if [ "$KSU" = "1" ] && [ "$KSU_SOURCE" = "builtin" ] && [ -z "$FOG_CFG" ] \
+		&& [ -f "$cfg_dir/vendor/fog_ksu.config" ]; then
+		FOG_CFG="vendor/fog_ksu.config"
 	fi
-
-	ls "$cfg_dir/vendor" 2>/dev/null | grep -E '\.config$' || true
-	ls "$cfg_dir/vendor/xiaomi" 2>/dev/null | head -n 30 || true
+	if [ -n "$FOG_CFG" ] && [ -f "$cfg_dir/$FOG_CFG" ]; then
+		echo "[+] Fragment dipakai: $FOG_CFG"
+	else
+		[ -z "$FOG_CFG" ] || echo "[!] Fragment $FOG_CFG tidak ada, dilewati"
+		FOG_CFG=""
+		echo "[*] Tanpa fragment tambahan, hanya $DEFCONFIG"
+	fi
 }
 
 setup_toolchain()
@@ -237,22 +237,38 @@ setup_toolchain()
 	git clone --depth=1 "$ANYKERNEL_REPO" "$AK3"
 }
 
-# Buang KernelSU bawaan source (biar tidak bentrok), pasang NadekoSU segar.
+# builtin : pakai KernelSU yang sudah ada di source ye (tanpa patch, tanpa download)
+# nadeko  : buang KernelSU bawaan, pasang NadekoSU segar (butuh hook manual)
 prepare_ksu()
 {
 	cd "$KERNEL"
 	KSU_TEXT="Off"
 	KSU_HOOK="none"
-	KERNELSU_VERSION="-"
 
 	if [ "$KSU" != "1" ]; then
 		echo "[*] KernelSU dimatikan (KSU=$KSU)"
 		return 0
 	fi
 
+	if [ "$KSU_SOURCE" = "builtin" ]; then
+		echo "[*] Pakai KernelSU bawaan source"
+		if [ ! -f drivers/kernelsu/Kconfig ] || ! grep -qi kernelsu drivers/Makefile \
+			|| ! grep -qi kernelsu drivers/Kconfig; then
+			echo "[×] KernelSU bawaan tidak lengkap di source ini (drivers/kernelsu, Makefile, Kconfig)."
+			echo "    Gunakan KSU_SOURCE=nadeko atau KSU=0."
+			exit 1
+		fi
+		KSU_HOOK="syscall-table"
+		local info
+		info="$(git log -1 --pretty=%s -- KernelSU 2>/dev/null | head -c 80 || true)"
+		KSU_TEXT="On (bundled, hook: ${KSU_HOOK})"
+		echo "[+] KernelSU: $KSU_TEXT"
+		[ -z "$info" ] || echo "    Commit KernelSU terakhir: $info"
+		return 0
+	fi
+
 	echo "[*] Bersihkan KernelSU bawaan source"
 	rm -rf KernelSU drivers/kernelsu drivers/KernelSU
-	# hapus sisa referensi lama; setup.sh NadekoSU akan menambahkan yang baru
 	sed -i '/kernelsu/Id' drivers/Makefile drivers/Kconfig
 
 	echo "[*] Setup NadekoSU"
@@ -267,21 +283,22 @@ prepare_ksu()
 		exit 1
 	fi
 
-	local cnt
+	local cnt ver
 	cnt="$(cd KernelSU && git rev-list --count HEAD 2>/dev/null || echo 0)"
-	KERNELSU_VERSION=$((33300 + cnt))
+	ver=$((33300 + cnt))
 
-	# Pilih metode hook sesuai dukungan versi NadekoSU
-	if grep -q "KSU_MANUAL_HOOK" KernelSU/kernel/Kconfig; then
-		KSU_HOOK="manual"
-	else
-		KSU_HOOK="branchlink"
+	# Kernel 4.19 hanya cocok dengan hook manual
+	if ! grep -q "KSU_MANUAL_HOOK" KernelSU/kernel/Kconfig; then
+		echo "[×] NadekoSU ini tidak punya KSU_MANUAL_HOOK. Tidak bisa dipakai di kernel 4.19."
+		exit 1
 	fi
-	KSU_TEXT="On (NadekoSU ${KERNELSU_VERSION}, hook: ${KSU_HOOK})"
+	KSU_HOOK="manual"
+	KSU_TEXT="On (NadekoSU ${ver}, hook: ${KSU_HOOK})"
 	echo "[+] KernelSU: $KSU_TEXT"
 }
 
-# Patch hook manual (hanya bila NadekoSU memakai KSU_MANUAL_HOOK)
+# Hanya untuk NadekoSU: source ye TIDAK punya hook KernelSU apa pun,
+# jadi patchs/KernelSU.patch wajib cocok dengan kernel 4.19.325 ini.
 apply_ksu_patch()
 {
 	[ "$KSU" = "1" ] && [ "$KSU_HOOK" = "manual" ] || return 0
@@ -289,17 +306,17 @@ apply_ksu_patch()
 
 	local p="$WORKDIR/patchs/KernelSU.patch"
 	if [ ! -f "$p" ]; then
-		echo "[×] $p tidak ditemukan. Mode manual hook butuh patchs/KernelSU.patch di repo workflow."
+		echo "[×] $p tidak ditemukan. NadekoSU butuh patch hook manual."
 		exit 1
 	fi
 
 	if patch -p1 --dry-run < "$p" >/dev/null 2>&1; then
 		patch -p1 < "$p"
 		echo "[+] KernelSU.patch diterapkan"
-	elif patch -p1 -R --dry-run < "$p" >/dev/null 2>&1; then
-		echo "[+] KernelSU.patch sudah ada di source, dilewati"
 	else
-		echo "[×] KernelSU.patch tidak cocok dengan source ini (reject)."
+		echo "[×] KernelSU.patch tidak cocok dengan source ye (kernel $KERVER)."
+		echo "    Pakai KSU_SOURCE=builtin atau buat ulang patch sesuai panduan NadekoSU."
+		patch -p1 --dry-run < "$p" 2>&1 | head -n 30 || true
 		exit 1
 	fi
 
@@ -349,17 +366,9 @@ build_kernel()
 	rm -rf out
 	make "${ARGS[@]}" "$DEFCONFIG"
 
-	# Fragment: fog.config; ksu.config HANYA untuk mode branchlink
-	local FRAGS=()
-	if [ -n "$FOG_CFG" ] && [ -f "arch/arm64/configs/$FOG_CFG" ]; then
-		FRAGS+=("arch/arm64/configs/$FOG_CFG")
-	fi
-	if [ "$KSU" = "1" ] && [ "$KSU_HOOK" = "branchlink" ] && [ -f arch/arm64/configs/vendor/ksu.config ]; then
-		FRAGS+=(arch/arm64/configs/vendor/ksu.config)
-	fi
-	if [ "${#FRAGS[@]}" -gt 0 ]; then
-		echo "[*] Merge fragment: ${FRAGS[*]}"
-		scripts/kconfig/merge_config.sh -m -O out out/.config "${FRAGS[@]}"
+	if [ -n "$FOG_CFG" ]; then
+		echo "[*] Merge fragment: $FOG_CFG"
+		scripts/kconfig/merge_config.sh -m -O out out/.config "arch/arm64/configs/$FOG_CFG"
 	fi
 
 	# Wajib untuk mount modul KernelSU
@@ -374,22 +383,25 @@ build_kernel()
 				-e KSU -e KSU_MANUAL_HOOK \
 				-e KSU_MANUAL_HOOK_AUTO_INPUT_HOOK \
 				-e KSU_MANUAL_HOOK_AUTO_SETUID_HOOK \
-				-e KSU_MANUAL_HOOK_AUTO_INITRC_HOOK \
-				-d KSU_HACK_ARM64_BRANCH_LINK
+				-e KSU_MANUAL_HOOK_AUTO_INITRC_HOOK
 		else
 			scripts/config --file out/.config -e KSU
 		fi
 	fi
 	make "${ARGS[@]}" olddefconfig
 
-	# Patch hook manual dilakukan setelah config siap
+	# Patch hook manual dilakukan setelah config siap (mode nadeko)
 	apply_ksu_patch
 
 	if [ "$KSU" = "1" ]; then
 		echo "--- CONFIG KernelSU di out/.config ---"
-		grep -E '^CONFIG_(KSU|OVERLAY_FS)' out/.config || true
+		grep -E '^CONFIG_(KSU|OVERLAY_FS|KPROBES)' out/.config || true
 		if ! grep -Eq '^CONFIG_KSU=y' out/.config; then
 			echo "[×] CONFIG_KSU=y tidak aktif setelah olddefconfig. Dihentikan agar tidak menghasilkan kernel tanpa root."
+			exit 1
+		fi
+		if [ "$KSU_HOOK" = "syscall-table" ] && ! grep -Eq '^CONFIG_KSU_TAMPER_SYSCALL_TABLE=y' out/.config; then
+			echo "[×] CONFIG_KSU_TAMPER_SYSCALL_TABLE tidak aktif (bergantung !CFI_CLANG). Root tidak akan berfungsi."
 			exit 1
 		fi
 		echo "[+] KernelSU AKTIF"
@@ -419,7 +431,9 @@ gen_zip()
 	local STAMP NAME
 	STAMP="$(date +%Y%m%d-%H%M)"
 	NAME="${KERNEL_NAME}-${DEVICE}"
-	[ "$KSU" = "1" ] && NAME="${NAME}-NDKSU"
+	if [ "$KSU" = "1" ]; then
+		if [ "$KSU_SOURCE" = "nadeko" ]; then NAME="${NAME}-NDKSU"; else NAME="${NAME}-KSU"; fi
+	fi
 	NAME="${NAME}-${STAMP}-${COMMIT_SHORT}.zip"
 
 	echo "[*] Cek device di anykernel.sh"
