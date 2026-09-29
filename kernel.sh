@@ -23,7 +23,7 @@ AK3="$WORKDIR/AnyKernel3"
 OUTDIR="$WORKDIR/output"
 LOG="$WORKDIR/error.log"
 
-KERNEL_REPO="https://github.com/Firatzzz/kernel_xiaomi_sm6225"
+KERNEL_REPO="https://github.com/Firatzzz/kernel_xiaomi_sm6225/tree/ye"
 KERNEL_BRANCH="${KERNEL_BRANCH:-}"
 ANYKERNEL_REPO="https://github.com/Kentanglu/AnyKernel3-680"
 CLANG_URL="https://github.com/ZyCromerZ/Clang/releases/download/17.0.0-20230725-release/Clang-17.0.0-20230725.tar.gz"
