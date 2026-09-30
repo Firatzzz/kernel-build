@@ -10,7 +10,7 @@ on:
       defconfig:
         description: "Defconfig (relatif terhadap arch/arm64/configs)"
         required: false
-        default: "vendor/bengal-perf_defconfig"
+        default: "vendor/fog-perf_defconfig"
       use_ksu:
         description: "Aktifkan KernelSU"
         type: boolean
