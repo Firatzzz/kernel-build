@@ -35,7 +35,7 @@ GCC64_REPO="https://github.com/ZyCromerZ/aarch64-linux-android-4.9"
 GCC32_REPO="https://github.com/ZyCromerZ/arm-linux-androideabi-4.9"
 NADEKO_SETUP_URL="https://raw.githubusercontent.com/dre698/NadekoSU/main/kernel/setup.sh"
 
-KERNEL_NAME="Shisouka-Kernel"
+KERNEL_NAME="Shisouka-Kernel-V2"
 AUTHOR="Firatz"
 MODEL="Redmi 10C"
 DEVICE="fog"
