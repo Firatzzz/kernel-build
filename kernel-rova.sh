@@ -8,6 +8,9 @@
 # Variabel environment (semua opsional, dari workflow):
 #   KERNEL_BRANCH : branch source kernel (default: 16-dev)
 #   DEFCONFIG     : defconfig relatif terhadap arch/arm64/configs (default: deteksi otomatis)
+#                   Nama yang tidak mengandung rova/rolex/riva/8917/8937 DIABAIKAN
+#                   (mis. bengal = SoC lain) kecuali FORCE_DEFCONFIG=1
+#   FORCE_DEFCONFIG : 1 = paksa pakai DEFCONFIG apa adanya
 #   FRAGMENTS     : fragment config tambahan, dipisah spasi (opsional)
 #   TOOLCHAIN     : proton (default, Clang 13 + binutils GNU) | zyc (Clang 17 + GCC 4.9)
 #   LLVM_IAS      : 1 (default) | 0 kalau ada error assembler
@@ -19,7 +22,7 @@
 #                   sukisu  = SukiSU-Ultra
 #   KSU_HOOK      : kprobes (default) | manual (hook harus SUDAH ada di source)
 #   CUSTOM_LOCALVERSION : suffix versi kernel (default kosong, lihat catatan modul)
-#   TG_BOT_TOKEN  : token bot Telegram (disarankan dari GitHub Secrets)
+#   TG_BOT_TOKEN  : token bot Telegram (opsional, default di bawah dipakai jika kosong)
 #   TG_CHAT_ID    : chat id grup Telegram (disarankan dari GitHub Secrets)
 
 set -eo pipefail
@@ -50,6 +53,7 @@ MODEL="Redmi 4A / 5A"
 DEVICE="rova"
 
 DEFCONFIG="${DEFCONFIG:-}"
+FORCE_DEFCONFIG="${FORCE_DEFCONFIG:-0}"
 FRAGMENTS="${FRAGMENTS:-}"
 LLVM_IAS="${LLVM_IAS:-1}"
 ENABLE_LTO="${ENABLE_LTO:-0}"
@@ -204,26 +208,39 @@ clone_kernel()
 	echo "Kernel  : $KERVER"
 }
 
-# Cari defconfig rova otomatis kalau DEFCONFIG tidak diisi / tidak ada.
+# Cari defconfig rova otomatis kalau DEFCONFIG tidak diisi / tidak ada / bukan SoC msm8917/8937.
 validate_defconfig()
 {
 	cd "$KERNEL"
 	local cfg_dir="arch/arm64/configs" cand found=""
+	local sane='rova|rolex|riva|8917|8937'
 	echo "[*] Defconfig tersedia yang berhubungan dengan rova/msm8917/msm8937:"
 	(cd "$cfg_dir" && find . -type f -name '*defconfig*' | sed 's|^\./||' \
-		| grep -iE 'rova|rolex|riva|8917|8937|mi8937' | sort | head -n 40) || true
+		| grep -iE "$sane|mi8937" | sort | head -n 40) || true
 
 	if [ -n "$DEFCONFIG" ] && [ -f "$cfg_dir/$DEFCONFIG" ]; then
-		found="$DEFCONFIG"
-	else
-		[ -z "$DEFCONFIG" ] || echo "[!] DEFCONFIG='$DEFCONFIG' tidak ada, mencari otomatis..."
-		for cand in rova_defconfig rova-perf_defconfig vendor/rova_defconfig \
-			rolex_defconfig riva_defconfig msm8917-perf_defconfig msm8917_defconfig; do
+		if [ "$FORCE_DEFCONFIG" = 1 ] || echo "$DEFCONFIG" | grep -qiE "$sane"; then
+			found="$DEFCONFIG"
+		else
+			echo "[!] DEFCONFIG='$DEFCONFIG' bukan defconfig msm8917/msm8937 (SoC lain), diabaikan."
+			echo "[!] Set FORCE_DEFCONFIG=1 jika memang sengaja."
+		fi
+	elif [ -n "$DEFCONFIG" ]; then
+		echo "[!] DEFCONFIG='$DEFCONFIG' tidak ada di branch ini."
+	fi
+
+	if [ -z "$found" ]; then
+		echo "[*] Mencari defconfig otomatis..."
+		for cand in rova_defconfig rova-perf_defconfig vendor/rova_defconfig vendor/rova-perf_defconfig \
+			rolex_defconfig riva_defconfig \
+			vendor/msm8937-perf_defconfig vendor/msm8937_defconfig \
+			msm8917-perf_defconfig msm8917_defconfig \
+			msm8937-perf_defconfig msm8937_defconfig; do
 			if [ -f "$cfg_dir/$cand" ]; then found="$cand"; break; fi
 		done
 		if [ -z "$found" ]; then
 			found="$(cd "$cfg_dir" && find . -type f -name '*_defconfig' | sed 's|^\./||' \
-				| grep -iE 'rova|rolex|riva|8917' | grep -viE 'debug|diag' | sort | head -n1 || true)"
+				| grep -iE "$sane" | grep -viE 'debug|diag' | sort | head -n1 || true)"
 		fi
 	fi
 
@@ -298,17 +315,32 @@ setup_toolchain()
 	git clone --depth=1 "$ANYKERNEL_REPO" "$AK3"
 }
 
+# Cari Kconfig yang mendefinisikan 'config KSU'.
+# PENTING: setup.sh KernelSU-Next / SukiSU membuat SYMLINK drivers/kernelsu ->
+# ../KernelSU-Next/kernel. 'grep -r' tidak mengikuti symlink di dalam rekursi, dan
+# direktori aslinya bernama KernelSU-Next (bukan KernelSU), jadi dulu tidak pernah ketemu.
+# Sekarang: cari langsung di direktori aslinya dan pakai 'grep -R' (ikuti symlink).
 find_ksu_kconfig()
 {
-	KSU_KCONFIG="$(grep -rlE '^config KSU$' --include='Kconfig*' \
-		KernelSU drivers fs kernel security 2>/dev/null | head -n1 || true)"
+	KSU_KCONFIG=""
+	local d f
+	for d in KernelSU-Next KernelSU SukiSU-Ultra drivers/kernelsu drivers/KernelSU; do
+		[ -e "$d" ] || continue
+		f="$(grep -RlE '^[[:space:]]*config[[:space:]]+KSU[[:space:]]*$' --include='Kconfig*' "$d" 2>/dev/null | head -n1 || true)"
+		if [ -n "$f" ]; then KSU_KCONFIG="$f"; break; fi
+	done
+	# Cadangan: KernelSU bawaan source yang tersebar di folder lain
+	if [ -z "$KSU_KCONFIG" ]; then
+		KSU_KCONFIG="$(grep -rlE '^[[:space:]]*config[[:space:]]+KSU[[:space:]]*$' --include='Kconfig*' \
+			drivers fs kernel security 2>/dev/null | head -n1 || true)"
+	fi
 }
 
 # Hapus KernelSU lama bawaan source sebelum memasang yang baru
 clean_ksu()
 {
 	echo "[*] Bersihkan KernelSU lama"
-	rm -rf KernelSU drivers/kernelsu drivers/KernelSU
+	rm -rf KernelSU KernelSU-Next SukiSU-Ultra drivers/kernelsu drivers/KernelSU
 	[ ! -f drivers/Makefile ] || sed -i '/kernelsu/Id' drivers/Makefile
 	[ ! -f drivers/Kconfig ] || sed -i '/kernelsu/Id' drivers/Kconfig
 }
@@ -365,6 +397,8 @@ prepare_ksu()
 	find_ksu_kconfig
 	if [ -z "$KSU_KCONFIG" ]; then
 		echo "[×] Setelah setup, Kconfig 'config KSU' tidak ditemukan. Integrasi gagal."
+		echo "    Isi direktori terkait (debug):"
+		ls -la drivers/kernelsu KernelSU-Next KernelSU SukiSU-Ultra 2>&1 | head -n 30 || true
 		exit 1
 	fi
 	if [ "$mode" != "builtin" ]; then
