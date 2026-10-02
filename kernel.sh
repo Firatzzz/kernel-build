@@ -2,18 +2,18 @@
 # shellcheck disable=SC2154
 #
 # Build Shisouka Kernel - Redmi 10C (fog / SM6225)
-# Source : https://github.com/Firatzzz/kernel_xiaomi_sm6225 (branch ye)
+# Source : https://github.com/Firatzzz/kernel_fog_shisouka
 # Dijalankan dari GitHub Actions:  bash kernel.sh
 #
 # Variabel environment (dari workflow):
-#   KERNEL_BRANCH : branch source kernel (default: ye)
+#   KERNEL_BRANCH : branch source kernel (default: main)
 #   DEFCONFIG     : defconfig relatif terhadap arch/arm64/configs
 #   FOG_CFG       : fragment config tambahan (opsional)
 #   KSU           : 1 = aktifkan KernelSU | 0 = matikan
 #   KSU_SOURCE    : nadeko  = NadekoSU + hook manual, dipasang otomatis (default)
-#                   builtin = KernelSU bawaan source ye (hook syscall table)
-#   TG_BOT_TOKEN  : token bot Telegram (WAJIB dari GitHub Secrets)
-#   TG_CHAT_ID    : chat id grup Telegram (dari GitHub Secrets)
+#                   builtin = KernelSU bawaan source (hook syscall table)
+#   TG_BOT_TOKEN  : token bot Telegram
+#   TG_CHAT_ID    : chat id grup Telegram
 
 set -eo pipefail
 
@@ -40,7 +40,7 @@ AUTHOR="Firatz"
 MODEL="Redmi 10C"
 DEVICE="fog"
 
-# Branch ye punya vendor/fog-perf_defconfig dan vendor/fog_ksu.config
+# Defconfig fog-perf (punya CONFIG_BUILD_ARM64_DT_OVERLAY)
 DEFCONFIG="${DEFCONFIG:-vendor/fog-perf_defconfig}"
 FOG_CFG="${FOG_CFG:-}"
 
@@ -108,7 +108,7 @@ tg_init()
 {
 	if [ "$PTTG" != 1 ]; then return 0; fi
 	if [ -z "$TOKEN" ] || [ -z "$CHATID" ]; then
-		echo "[!] TG_BOT_TOKEN / TG_CHAT_ID kosong. Set di GitHub Secrets. Telegram dilewati."
+		echo "[!] TG_BOT_TOKEN / TG_CHAT_ID kosong. Telegram dilewati."
 		return 0
 	fi
 
@@ -206,7 +206,7 @@ validate_defconfig()
 	esac
 	echo "[+] Defconfig dipakai: $DEFCONFIG"
 
-	# Fragment KernelSU bawaan source ye hanya untuk mode builtin
+	# Fragment KernelSU bawaan source hanya untuk mode builtin
 	if [ "$KSU" = "1" ] && [ "$KSU_SOURCE" = "builtin" ] && [ -z "$FOG_CFG" ] \
 		&& [ -f "$cfg_dir/vendor/fog_ksu.config" ]; then
 		FOG_CFG="vendor/fog_ksu.config"
@@ -248,7 +248,7 @@ setup_toolchain()
 	git clone --depth=1 "$ANYKERNEL_REPO" "$AK3"
 }
 
-# builtin : pakai KernelSU yang sudah ada di source ye (tanpa patch, tanpa download)
+# builtin : pakai KernelSU yang sudah ada di source (tanpa patch, tanpa download)
 # nadeko  : buang KernelSU bawaan, pasang NadekoSU segar (butuh hook manual)
 prepare_ksu()
 {
@@ -308,7 +308,46 @@ prepare_ksu()
 	echo "[+] KernelSU: $KSU_TEXT"
 }
 
-# NadekoSU (kernel 4.19) butuh hook manual. Source ye TIDAK punya hook KernelSU
+# FIX: "can't open file drivers/input/touchscreen/st/Kconfig"
+# Source di repo kadang punya baris `source "path/Kconfig"` yang filenya tidak
+# ikut ter-commit (folder driver hilang / submodule belum di-init). Akibatnya
+# `make defconfig` langsung berhenti. Di sini:
+#   1) submodule (bila ada) di-init dulu
+#   2) setiap Kconfig yang direferensikan tapi tidak ada dibuatkan stub kosong
+# Catatan: stub hanya meloloskan konfigurasi. Bila driver yang hilang memang
+# dipakai device (mis. touchscreen ST), source-nya tetap harus dikembalikan
+# ke repo supaya fiturnya berfungsi.
+fix_missing_kconfig()
+{
+	cd "$KERNEL"
+
+	if [ -f .gitmodules ]; then
+		echo "[*] Init submodule"
+		git submodule update --init --depth=1 --recursive || echo "[!] submodule gagal di-init"
+	fi
+
+	echo "[*] Cek referensi 'source' Kconfig yang hilang"
+	local p miss=0
+	while IFS= read -r p; do
+		[ -n "$p" ] || continue
+		if [ ! -f "$p" ]; then
+			echo "[!] Kconfig hilang: $p -> dibuat stub kosong"
+			mkdir -p "$(dirname "$p")"
+			printf '# stub dibuat otomatis oleh kernel.sh (source asli tidak ada di repo)\n' > "$p"
+			miss=1
+		fi
+	done < <(grep -rhoE --include='Kconfig*' --exclude-dir=.git \
+		'^[[:space:]]*source[[:space:]]+"[^"$]+"' . \
+		| sed -E 's/^[[:space:]]*source[[:space:]]+"//; s/"$//' | sort -u)
+
+	if [ "$miss" = 0 ]; then
+		echo "[+] Semua source Kconfig lengkap"
+	else
+		echo "[!] Ada Kconfig yang di-stub. Pastikan driver terkait memang tidak dibutuhkan."
+	fi
+}
+
+# NadekoSU (kernel 4.19) butuh hook manual. Source TIDAK punya hook KernelSU
 # apa pun (KernelSU bawaannya memakai syscall table), jadi hook dipasang di sini
 # langsung ke: fs/exec.c, fs/open.c, fs/stat.c, kernel/reboot.c.
 # Hook setuid / init.rc / input ditangani otomatis lewat LSM & input_handler
@@ -643,6 +682,7 @@ clone_kernel
 validate_defconfig
 setup_toolchain
 prepare_ksu
+fix_missing_kconfig
 notify_start
 build_kernel
 gen_zip
